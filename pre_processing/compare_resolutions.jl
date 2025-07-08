@@ -251,21 +251,12 @@ function analyze_extreme_events(basin_id::String, basin_name::String, year::Int,
 
   daily_drought_thresh, daily_flood_thresh, monthly_drought_thresh, monthly_flood_thresh = precomputed_data
 
-  # Calculate extreme event metrics using annual mean values for consistency
-  daily_annual_mean = mean(daily_year_values) #FIX-ME this is methodologically wrong!
-  monthly_annual_mean = mean(monthly_year_values)
+  # Calculate extreme event metrics at native frequency then aggregate
+  daily_flood_excess, daily_drought_excess, daily_flood_days, daily_drought_days =
+    calculate_excess_mass(daily_year_values, daily_flood_thresh, daily_drought_thresh)
 
-  # Calculate excess based on annual means vs thresholds
-  daily_flood_excess = max(0, daily_annual_mean - daily_flood_thresh)
-  daily_drought_excess = max(0, daily_drought_thresh - daily_annual_mean)
-  monthly_flood_excess = max(0, monthly_annual_mean - monthly_flood_thresh)
-  monthly_drought_excess = max(0, monthly_drought_thresh - monthly_annual_mean)
-
-  # Count extreme events in the raw time series
-  daily_flood_days = count(q -> q > daily_flood_thresh, daily_year_values)
-  daily_drought_days = count(q -> q < daily_drought_thresh, daily_year_values)
-  monthly_flood_months = count(q -> q > monthly_flood_thresh, monthly_year_values)
-  monthly_drought_months = count(q -> q < monthly_drought_thresh, monthly_year_values)
+  monthly_flood_excess, monthly_drought_excess, monthly_flood_months, monthly_drought_months =
+    calculate_excess_mass(monthly_year_values, monthly_flood_thresh, monthly_drought_thresh)
 
   return BasinExtremeResult(
     basin_id,

@@ -61,6 +61,7 @@ Base.@kwdef struct ProcessingConfig
 
   # Paths (configurable)
   input_dir::String
+  area_file::String
   basin_shapefile::String
   output_dir::String
 end
@@ -139,7 +140,7 @@ end
 Load area grid for unit conversion (landareamaskmap0.nc equivalent).
 """
 function load_area_grid(config::ProcessingConfig)
-  area_file = "/mnt/p/ene.model/NEST/Hydrology/landareamaskmap0.nc"
+  area_file = config.area_file
 
   if !isfile(area_file)
     @warn "Area grid file not found: $(area_file). Using unit area."
@@ -472,6 +473,9 @@ function main()
     "--input-dir", "-i"
     help = "Input directory containing NetCDF files"
     default = "/mnt/p/watxene/ISIMIP/ISIMIP3b/OutputData"
+    "--area-file", "-area"
+    help = "Areas for grid cells"
+    default = "/mnt/p/ene.model/NEST/Hydrology/landareamaskmap0.nc"
     "--basin-shapefile", "-b"
     help = "Basin shapefile directory"
     default = "/home/raghunathan/ISIMIP/basins_delineated/basins_by_region_simpl_R12.shp"
@@ -499,6 +503,7 @@ function main()
       temporal_resolution=get(config_dict, "temporal_resolution", args["temporal-resolution"]),
       spatial_method=get(config_dict, "spatial_method", args["spatial-method"]),
       input_dir=expand_path(get(config_dict, "input_dir", args["input-dir"])),
+      area_file=expand_path(get(config_dict, key:"area_file", args["area-file"])),
       basin_shapefile=expand_path(get(config_dict, "basin_shapefile", args["basin-shapefile"])),
       output_dir=expand_path(get(config_dict, "output_dir", args["output-dir"])),
     )
