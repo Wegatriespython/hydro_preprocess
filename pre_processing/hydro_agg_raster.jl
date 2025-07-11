@@ -10,7 +10,7 @@ ready for processing by hydro_agg_basin.py.
 using NetCDF, DataFrames, CSV, Dates, Statistics
 using ArchGDAL, GeoDataFrames
 using ProgressMeter, ArgParse, YAML
-using PyCall, Rasters, Distributed
+using PyCall, Rasters
 
 iam_units = pyimport("iam_units")
 registry = iam_units.registry
@@ -243,7 +243,7 @@ function process_netcdf_file(filepath::String, config::ProcessingConfig,
     y_range = range(maximum(lats), minimum(lats), length=length(lats))
 
     # Define aggregation function based on method
-    agg_func = config.spatial_method == "sum" ? sum : mean
+    agg_func = config.spatial_method == "sum" ? sum : mean #Sum and mean are incorrect for dis.
 
     # Get unit conversion factor once
     conversion_factor, needs_area = get_unit_conversion_factor(config.variable)
@@ -358,39 +358,41 @@ function process_hydro_data(config::ProcessingConfig)
   all_outputs = String[]
 
   if config.temporal_resolution == "daily" && length(netcdf_files) > 1
-    # Handle multiple daily files - process in parallel and concatenate
-    println("Processing $(length(netcdf_files)) daily files in parallel...")
+    # Handle multiple daily files - process sequentially and concatenate
+    println("Processing $(length(netcdf_files)) daily files sequentially...")
 
-    # Process files in parallel using @distributed
-    results = @distributed (append!) for netcdf_file in netcdf_files
+    # Store results
+    successful_results = Tuple{Matrix{Float64},Vector{Date},String}[]
+
+    # Process files sequentially
+    for netcdf_file in netcdf_files
       try
         # Process single file
         aggregated_data, time_index = process_netcdf_file(
           netcdf_file, config, basins_gdf, area_grid
         )
 
-        # Return tuple of results
-        [(aggregated_data, time_index, basename(netcdf_file))]
+        # Store result
+        push!(successful_results, (aggregated_data, time_index, basename(netcdf_file)))
 
       catch e
         @error "Failed to process $(basename(netcdf_file)): $(e)"
-        # Return empty array for failed files
-        Tuple{Matrix{Float64},Vector{Date},String}[]
+        continue
       end
     end
 
-    # Sort results by filename to ensure temporal order
-    sort!(results, by=x -> x[3])
+    # Sort by filename to ensure temporal order
+    sort!(successful_results, by=x -> x[3])
 
     # Concatenate all daily chunks sequentially
-    if !isempty(results)
-      all_aggregated_data = [r[1] for r in results]
-      all_time_indices = [r[2] for r in results]
+    if !isempty(successful_results)
+      all_aggregated_data = [r[1] for r in successful_results]
+      all_time_indices = [r[2] for r in successful_results]
 
       concatenated_data = hcat(all_aggregated_data...)
       concatenated_time_index = vcat(all_time_indices...)
 
-      println("Concatenated $(length(results)) daily files into single dataset")
+      println("Concatenated $(length(successful_results)) daily files into single dataset")
       println("Final dimensions: $(size(concatenated_data))")
 
       # Save single CSV output
@@ -454,7 +456,7 @@ function main()
     default = "gfdl-esm4"
     "--scenario", "-s"
     help = "Climate scenario"
-    default = "ssp126"
+    default = "ssp370"
     "--region", "-r"
     help = "Regional configuration (R11, R12)"
     default = "R12"
@@ -473,7 +475,7 @@ function main()
     "--input-dir", "-i"
     help = "Input directory containing NetCDF files"
     default = "/mnt/p/watxene/ISIMIP/ISIMIP3b/OutputData"
-    "--area-file", "-area"
+    "--area-file", "-a"
     help = "Areas for grid cells"
     default = "/mnt/p/ene.model/NEST/Hydrology/landareamaskmap0.nc"
     "--basin-shapefile", "-b"
@@ -503,7 +505,7 @@ function main()
       temporal_resolution=get(config_dict, "temporal_resolution", args["temporal-resolution"]),
       spatial_method=get(config_dict, "spatial_method", args["spatial-method"]),
       input_dir=expand_path(get(config_dict, "input_dir", args["input-dir"])),
-      area_file=expand_path(get(config_dict, key:"area_file", args["area-file"])),
+      area_file=expand_path(get(config_dict, "area_file", args["area-file"])),
       basin_shapefile=expand_path(get(config_dict, "basin_shapefile", args["basin-shapefile"])),
       output_dir=expand_path(get(config_dict, "output_dir", args["output-dir"])),
     )
@@ -519,6 +521,7 @@ function main()
       temporal_resolution=args["temporal-resolution"],
       spatial_method=args["spatial-method"],
       input_dir=expand_path(args["input-dir"]),
+      area_file=expand_path(args["area-file"]),
       basin_shapefile=expand_path(args["basin-shapefile"]),
       output_dir=expand_path(args["output-dir"]),
     )
