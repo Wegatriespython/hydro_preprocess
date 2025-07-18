@@ -149,6 +149,19 @@ function load_area_grid(config::ProcessingConfig)
 
   println("Loading area grid...")
   area_data = NetCDF.ncread(area_file, "land area")
+
+  # Check for NaN values in area grid
+  nan_count = sum(isnan.(area_data))
+  total_count = length(area_data)
+
+  if nan_count > 0
+    println("WARNING: Area grid contains $(nan_count)/$(total_count) NaN values ($(round(nan_count/total_count*100, digits=1))%)")
+
+    # Replace NaN values with zero for areas (no contribution to aggregation)
+    area_data[isnan.(area_data)] .= 0.0
+    println("Replaced NaN values with 0.0 for proper aggregation")
+  end
+
   return area_data
 end
 
@@ -243,7 +256,8 @@ function process_netcdf_file(filepath::String, config::ProcessingConfig,
     y_range = range(maximum(lats), minimum(lats), length=length(lats))
 
     # Define aggregation function based on method
-    agg_func = config.spatial_method == "sum" ? sum : mean #Sum and mean are incorrect for dis.
+    # Note: NaN handling is done at the data level, not aggregation level
+    agg_func = config.spatial_method == "sum" ? sum : mean
 
     # Get unit conversion factor once
     conversion_factor, needs_area = get_unit_conversion_factor(config.variable)
@@ -279,6 +293,11 @@ function process_netcdf_file(filepath::String, config::ProcessingConfig,
 
         # Perform zonal aggregation for all basins at once
         basin_values = Rasters.zonal(agg_func, raster_slice; of=basins_gdf)
+
+        # Post-process extreme values (likely from missing data flags like 1e20)
+        # Replace extreme values with NaN to indicate missing/invalid data
+        extreme_threshold = 1e15  # Much smaller than 1e20 but still very large
+        basin_values[abs.(basin_values).>=extreme_threshold] .= NaN
 
         # Store results
         basin_data[:, global_t] = basin_values
@@ -456,7 +475,7 @@ function main()
     default = "gfdl-esm4"
     "--scenario", "-s"
     help = "Climate scenario"
-    default = "ssp370"
+    default = "ssp126"
     "--region", "-r"
     help = "Regional configuration (R11, R12)"
     default = "R12"
@@ -468,7 +487,7 @@ function main()
     default = "future"
     "--temporal-resolution"
     help = "Temporal resolution (monthly or daily)"
-    default = "daily"
+    default = "monthly"
     "--spatial-method"
     help = "Spatial aggregation method (sum or mean)"
     default = "sum"

@@ -2,7 +2,7 @@
 
 julia_version = "1.11.5"
 manifest_format = "2.0"
-project_hash = "ab266768e72748fc38b2a2f50dbfa93957a8dde3"
+project_hash = "3dc547dd52752c59358be38bc9535299aaf52bce"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "be7ae030256b8ef14a441726c4c37766b90b93a3"
@@ -2033,6 +2033,16 @@ git-tree-sha1 = "994cc27cdacca10e68feb291673ec3a76aa2fae9"
 uuid = "94ee1d12-ae83-5a48-8b1c-48b8ff168ae0"
 version = "0.7.6"
 
+[[deps.RCall]]
+deps = ["CategoricalArrays", "Conda", "DataFrames", "DataStructures", "Dates", "Libdl", "Preferences", "REPL", "Random", "StatsModels", "WinReg"]
+git-tree-sha1 = "815f2e4b52e377eb7ae21c8235bd3e2e3e0bfd9e"
+uuid = "6f49c342-dc21-5d91-9882-a32aef131414"
+version = "0.14.8"
+weakdeps = ["AxisArrays"]
+
+    [deps.RCall.extensions]
+    RCallAxisArraysExt = ["AxisArrays"]
+
 [[deps.REPL]]
 deps = ["InteractiveUtils", "Markdown", "Sockets", "StyledStrings", "Unicode"]
 uuid = "3fa0cd96-eef1-5676-8a61-b3b8758bbffb"
@@ -2611,6 +2621,11 @@ deps = ["Colors", "Dates", "Observables", "OrderedCollections"]
 git-tree-sha1 = "e9aeb174f95385de31e70bd15fa066a505ea82b9"
 uuid = "cc8bc4a8-27d6-5769-a93b-9d913e69aa62"
 version = "0.6.7"
+
+[[deps.WinReg]]
+git-tree-sha1 = "cd910906b099402bcc50b3eafa9634244e5ec83b"
+uuid = "1b915085-20d7-51cf-bf83-8f477d6f5128"
+version = "1.0.0"
 
 [[deps.WoodburyMatrices]]
 deps = ["LinearAlgebra", "SparseArrays"]
