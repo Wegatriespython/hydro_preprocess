@@ -1,0 +1,763 @@
+#!/usr/bin/env python3
+"""
+Data Preparation Module for Hydro Model Output Analysis
+=======================================================
+
+This module handles data loading, cleaning, reshaping, and preparation
+for downstream analysis (ANOVA, etc.). Designed to be reusable and configurable.
+"""
+
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from typing import List, Optional, Tuple, Dict, Union
+import warnings
+import gc
+
+warnings.filterwarnings("ignore")
+
+
+def parse_filename(filename: str) -> Optional[Dict[str, str]]:
+    """
+    Parse filename to extract components.
+
+    Expected format: {variable}_{frequency}_{hydro_model}_{climate_model}_{scenario}_{time_period}.csv
+
+    Args:
+        filename: Name of the CSV file
+
+    Returns:
+        Dict with components or None if parsing fails
+    """
+    if not filename.endswith(".csv"):
+        return None
+
+    # Remove .csv extension
+    basename = filename[:-4]
+
+    # Split by underscore
+    parts = basename.split("_")
+
+    if len(parts) < 6:
+        return None
+
+    # Handle cases where hydro model names have hyphens (e.g., MIROC-INTEG-LAND)
+    # We know the structure is: variable_frequency_hydro_model_climate_model_scenario_timeperiod
+    # Climate models and scenarios are known patterns
+
+    variable = parts[0]
+    frequency = parts[1]
+
+    # Find the climate model and scenario by looking for known patterns
+    climate_models = [
+        "gfdl-esm4",
+        "ipsl-cm6a-lr",
+        "mpi-esm1-2-hr",
+        "mri-esm2-0",
+        "ukesm1-0-ll",
+    ]
+    ssp_scenarios = ["ssp126", "ssp370", "ssp585"]
+
+    climate_model_idx = None
+    scenario_idx = None
+
+    # Find climate model position
+    for i, part in enumerate(parts):
+        if part in climate_models:
+            climate_model_idx = i
+            break
+
+    # Find scenario position
+    for i, part in enumerate(parts):
+        if part in ssp_scenarios:
+            scenario_idx = i
+            break
+
+    if climate_model_idx is None or scenario_idx is None:
+        return None
+
+    # Extract components
+    climate_model = parts[climate_model_idx]
+    scenario = parts[scenario_idx]
+    time_period = parts[-1]  # Last part is always time period
+
+    # Hydro model is everything between frequency and climate model
+    hydro_model_parts = parts[2:climate_model_idx]
+    hydro_model = "-".join(hydro_model_parts)
+
+    return {
+        "variable": variable,
+        "frequency": frequency,
+        "hydro_model": hydro_model,
+        "climate_model": climate_model,
+        "scenario": scenario,
+        "time_period": time_period,
+    }
+
+
+def discover_available_models(
+    data_dir: Union[str, Path], variable: str = "qtot", frequency: str = "monthly"
+) -> Tuple[List[str], List[str]]:
+    """
+    Auto-discover available hydro and climate models from directory.
+
+    Args:
+        data_dir: Directory containing CSV files
+        variable: Variable to look for
+        frequency: Frequency to look for
+
+    Returns:
+        Tuple of (hydro_models, climate_models) found
+    """
+    data_dir = Path(data_dir)
+
+    hydro_models = set()
+    climate_models = set()
+
+    # Look for files matching the pattern
+    for file_path in data_dir.glob(f"{variable}_{frequency}_*.csv"):
+        parsed = parse_filename(file_path.name)
+        if parsed:
+            hydro_models.add(parsed["hydro_model"])
+            climate_models.add(parsed["climate_model"])
+
+    return sorted(list(hydro_models)), sorted(list(climate_models))
+
+
+def load_var_data(
+    data_dir: Union[str, Path],
+    variable: str = "qtot",
+    frequency: str = "monthly",
+    hydro_models: Optional[List[str]] = None,
+    climate_models: Optional[List[str]] = None,
+    ssp_scenarios: Optional[List[str]] = None,
+    time_period: str = "future",
+) -> pd.DataFrame:
+    """
+    Load all variable CSV files and merge them into a single dataframe.
+
+    Args:
+        data_dir: Directory containing the CSV files
+        variable: Variable name (default: "qtot")
+        frequency: Frequency ("daily" or "monthly")
+        hydro_models: List of hydro models (auto-discover if None)
+        climate_models: List of climate models (auto-discover if None)
+        ssp_scenarios: List of SSP scenarios (default: ssp126, ssp370, ssp585)
+        time_period: Time period (default: "future")
+
+    Returns:
+        pd.DataFrame: Combined dataset with values for all model/scenario combinations
+    """
+    data_dir = Path(data_dir)
+
+    # Auto-discover models if not specified
+    if hydro_models is None or climate_models is None:
+        discovered_hydro, discovered_climate = discover_available_models(
+            data_dir, variable, frequency
+        )
+        if hydro_models is None:
+            hydro_models = discovered_hydro
+        if climate_models is None:
+            climate_models = discovered_climate
+
+    if ssp_scenarios is None:
+        ssp_scenarios = ["ssp126", "ssp370", "ssp585"]
+
+    print(f"Loading {variable} {frequency} data files from {data_dir}...")
+    print(f"  Hydro models: {hydro_models}")
+    print(f"  Climate models: {climate_models}")
+
+    all_data = []
+    file_count = 0
+
+    for hydro_model in hydro_models:
+        for climate_model in climate_models:
+            for scenario in ssp_scenarios:
+                filename = f"{variable}_{frequency}_{hydro_model}_{climate_model}_{scenario}_{time_period}.csv"
+                filepath = data_dir / filename
+
+                if not filepath.exists():
+                    print(f"Warning: File not found: {filename}")
+                    continue
+
+                print(f"  Loading: {filename}")
+
+                df = pd.read_csv(filepath)
+                df["hydro_model"] = hydro_model
+                df["climate_model"] = climate_model
+                df["ssp_scenario"] = scenario
+
+                all_data.append(df)
+                file_count += 1
+
+                # Force garbage collection every 10 files to manage memory
+                if file_count % 10 == 0:
+                    gc.collect()
+                    print(f"    Loaded {file_count} files, memory cleaned")
+
+    if not all_data:
+        raise FileNotFoundError(
+            f"No {variable} {frequency} data files found in {data_dir}!"
+        )
+
+    print(f"Concatenating {len(all_data)} files...")
+    combined_df = pd.concat(all_data, ignore_index=True)
+
+    # Clean up individual dataframes
+    del all_data
+    gc.collect()
+
+    print(f"Loaded {file_count} files with {len(combined_df)} total rows")
+
+    return combined_df
+
+
+def clean_outliers(
+    df: pd.DataFrame, value_column: str = "qtot", threshold: float = 1e15
+) -> pd.DataFrame:
+    """
+    Remove outliers and problematic data from dataset.
+
+    Args:
+        df: DataFrame with values to clean
+        value_column: Name of the column containing values to clean
+        threshold: Upper threshold for values (default 1e15)
+
+    Returns:
+        pd.DataFrame: Cleaned dataframe
+    """
+    print(
+        f"Comprehensive data cleaning for {value_column} (threshold {threshold:.0e})..."
+    )
+
+    initial_count = len(df)
+
+    print(
+        f"  Initial {value_column} range: {df[value_column].min():.2e} to {df[value_column].max():.2e}"
+    )
+
+    extreme_outliers = df[value_column] > threshold
+    print(f"  Found {extreme_outliers.sum()} extreme outliers (> {threshold:.0e})")
+
+    basin_outlier_rates = df.groupby("BASIN_ID").apply(
+        lambda x: (x[value_column] > threshold).sum() / len(x)
+    )
+    problematic_basins = basin_outlier_rates[basin_outlier_rates > 0.5].index
+
+    if len(problematic_basins) > 0:
+        print(f"  Found {len(problematic_basins)} basins with >50% outliers:")
+        for basin_id in problematic_basins:
+            basin_name = df[df["BASIN_ID"] == basin_id]["NAME"].iloc[0]
+            rate = basin_outlier_rates[basin_id]
+            print(
+                f"    Basin {basin_id} ({basin_name[:40]:40s}): {rate * 100:.1f}% outliers"
+            )
+
+        basin_mask = ~df["BASIN_ID"].isin(problematic_basins)
+        df_clean = df[basin_mask].copy()
+        removed_basins = initial_count - len(df_clean)
+        print(f"  Removed {removed_basins} rows from problematic basins")
+    else:
+        df_clean = df.copy()
+
+    extreme_mask = df_clean[value_column] <= threshold
+    df_clean = df_clean[extreme_mask]
+
+    negative_count = (df_clean[value_column] < 0).sum()
+    if negative_count > 0:
+        print(f"  Found {negative_count} negative {value_column} values, removing...")
+        df_clean = df_clean[df_clean[value_column] >= 0]
+
+    inf_nan_count = (~np.isfinite(df_clean[value_column])).sum()
+    if inf_nan_count > 0:
+        print(f"  Found {inf_nan_count} infinite/NaN values, removing...")
+        df_clean = df_clean[np.isfinite(df_clean[value_column])]
+
+    def clean_basin_outliers(basin_data):
+        """Apply IQR outlier removal within each basin."""
+        if len(basin_data) < 10:
+            return basin_data
+
+        Q1 = basin_data[value_column].quantile(0.25)
+        Q3 = basin_data[value_column].quantile(0.75)
+        IQR = Q3 - Q1
+
+        lower_bound = Q1 - 3 * IQR
+        upper_bound = Q3 + 3 * IQR
+
+        if lower_bound < 0:
+            lower_bound = 0
+        if upper_bound > threshold / 10:
+            upper_bound = threshold / 10
+
+        return basin_data[
+            (basin_data[value_column] >= lower_bound)
+            & (basin_data[value_column] <= upper_bound)
+        ]
+
+    initial_clean_count = len(df_clean)
+    df_clean = df_clean.groupby("BASIN_ID", group_keys=False).apply(
+        clean_basin_outliers
+    )
+    basin_outliers_removed = initial_clean_count - len(df_clean)
+
+    if basin_outliers_removed > 0:
+        print(
+            f"  Removed {basin_outliers_removed} basin-specific outliers using IQR method"
+        )
+
+    final_count = len(df_clean)
+    total_removed = initial_count - final_count
+    removed_pct = (total_removed / initial_count) * 100
+
+    print(f"  TOTAL REMOVED: {total_removed:,} rows ({removed_pct:.1f}%)")
+    print(f"  Final data: {final_count:,} rows")
+    print(
+        f"  Final {value_column} range: {df_clean[value_column].min():.2e} to {df_clean[value_column].max():.2e}"
+    )
+    print(
+        f"  Final basins: {df_clean['BASIN_ID'].nunique()} (removed {len(problematic_basins)} problematic basins)"
+    )
+
+    return df_clean
+
+
+def filter_basins_by_runoff(
+    df: pd.DataFrame, value_column: str = "qtot", drop_percentile: float = 0
+) -> pd.DataFrame:
+    """
+    Filter basins based on average value to focus on hydrologically significant basins.
+
+    Args:
+        df: Long format dataframe
+        value_column: Column name containing values to filter by
+        drop_percentile: Percentile threshold (0-100). Basins below this percentile
+                        of average value will be dropped. E.g., 50 drops bottom 50%.
+
+    Returns:
+        pd.DataFrame: Filtered dataframe
+    """
+    if drop_percentile <= 0:
+        print(f"No basin filtering (drop_percentile={drop_percentile})")
+        return df
+
+    print(
+        f"Filtering basins by average {value_column} (dropping bottom {drop_percentile}th percentile)..."
+    )
+
+    # Calculate mean values per basin (aggregate across all hydro/climate models and scenarios)
+    basin_means = df.groupby(["BASIN_ID", "NAME"])[value_column].mean().reset_index()
+    basin_means = basin_means.rename(columns={value_column: f"mean_{value_column}"})
+
+    threshold = np.percentile(basin_means[f"mean_{value_column}"], drop_percentile)
+
+    basins_to_keep = basin_means[basin_means[f"mean_{value_column}"] >= threshold][
+        "BASIN_ID"
+    ].values
+    basins_to_drop = basin_means[basin_means[f"mean_{value_column}"] < threshold]
+
+    print(f"  Threshold (P{drop_percentile}): {threshold:.2e}")
+    print(f"  Keeping {len(basins_to_keep)} basins (≥{threshold:.2e})")
+    print(f"  Dropping {len(basins_to_drop)} basins (<{threshold:.2e})")
+
+    if len(basins_to_drop) > 0:
+        print("  Examples of dropped low-runoff basins:")
+        for _, basin in basins_to_drop.head(5).iterrows():
+            print(
+                f"    Basin {basin['BASIN_ID']:3.0f}: {basin['NAME'][:40]:40s} (mean {value_column}: {basin[f'mean_{value_column}']:.2e})"
+            )
+        if len(basins_to_drop) > 5:
+            print(f"    ... and {len(basins_to_drop) - 5} more")
+
+    filtered_df = df[df["BASIN_ID"].isin(basins_to_keep)].copy()
+
+    high_runoff_basins = basin_means[
+        basin_means["BASIN_ID"].isin(basins_to_keep)
+    ].nlargest(5, f"mean_{value_column}")
+    print("  Examples of kept high-runoff basins:")
+    for _, basin in high_runoff_basins.iterrows():
+        print(
+            f"    Basin {basin['BASIN_ID']:3.0f}: {basin['NAME'][:40]:40s} (mean {value_column}: {basin[f'mean_{value_column}']:.2e})"
+        )
+
+    print(
+        f"  Final dataset: {len(filtered_df):,} rows from {len(basins_to_keep)} basins"
+    )
+
+    return filtered_df
+
+
+def compute_rolling_averages(
+    df: pd.DataFrame,
+    value_column: str = "qtot",
+    frequency: Optional[str] = None,
+    windows: Optional[Dict[str, int]] = None,
+) -> pd.DataFrame:
+    """
+    Compute rolling averages for temporal analysis.
+
+    Args:
+        df: Long format dataframe with date, year columns
+        value_column: Column containing values to average
+        frequency: Data frequency ("daily" or "monthly"). Auto-detected if None.
+        windows: Dictionary of window names and sizes. If None, defaults based on frequency.
+
+    Returns:
+        pd.DataFrame: Dataframe with rolling average columns added
+    """
+    # Auto-detect frequency if not provided
+    if frequency is None:
+        # Sample some data to detect frequency
+        sample_dates = df["date"].sort_values().head(3)
+        if len(sample_dates) >= 2:
+            diff_days = (sample_dates.iloc[1] - sample_dates.iloc[0]).days
+            frequency = "daily" if diff_days == 1 else "monthly"
+        else:
+            frequency = "monthly"  # Default
+
+    # Set default windows based on frequency
+    if windows is None:
+        if frequency == "daily":
+            # For daily data: 5yr ≈ 1825 days, 10yr ≈ 3650 days, 30yr ≈ 10950 days
+            windows = {"5yr": 1825, "10yr": 3650, "30yr": 10950}
+        else:
+            # For monthly data: 5yr = 60 months, 10yr = 120 months, 30yr = 360 months
+            windows = {"5yr": 60, "10yr": 120, "30yr": 360}
+
+    print(f"  Computing rolling averages for {value_column} ({frequency} frequency)...")
+    print(f"    Window sizes: {windows}")
+
+    def add_rolling_avg_for_group(group_data):
+        """Add rolling averages for a specific basin-hydro_model-climate_model-scenario combination."""
+        group_data = group_data.sort_values("date").copy()
+
+        for window_name, window_size in windows.items():
+            col_name = f"{value_column}_{window_name}"
+            # Use stricter min_periods - require at least 80% of the window for valid averages
+            min_periods = max(int(window_size * 0.8), window_size // 2)
+
+            rolling_values = (
+                group_data[value_column]
+                .rolling(window=window_size, min_periods=min_periods, center=True)
+                .mean()
+            )
+
+            # For centered rolling windows, mask edge values that don't have sufficient data
+            half_window = window_size // 2
+
+            # Create mask to identify valid rolling average positions
+            valid_mask = pd.Series(True, index=rolling_values.index)
+
+            # Mask beginning and end based on actual data availability
+            if len(group_data) > window_size:
+                # For centered windows with sufficient data, mask the edges
+                valid_mask.iloc[:half_window] = False  # Beginning
+                valid_mask.iloc[-half_window:] = False  # End
+            else:
+                # If we don't have enough data for a full window, mark all as invalid
+                valid_mask[:] = False
+
+            # Apply the mask
+            rolling_values = rolling_values.where(valid_mask)
+            group_data[col_name] = rolling_values
+
+        return group_data
+
+    # Update grouping to include hydro_model
+    grouping_cols = ["BASIN_ID", "hydro_model", "climate_model", "ssp_scenario"]
+    df_with_rolling = df.groupby(grouping_cols, group_keys=False).apply(
+        add_rolling_avg_for_group
+    )
+
+    df_with_rolling["period_2015_2030"] = (df_with_rolling["year"] >= 2015) & (
+        df_with_rolling["year"] <= 2030
+    )
+    df_with_rolling["period_2040_2055"] = (df_with_rolling["year"] >= 2040) & (
+        df_with_rolling["year"] <= 2055
+    )
+    df_with_rolling["period_2070_2085"] = (df_with_rolling["year"] >= 2070) & (
+        df_with_rolling["year"] <= 2085
+    )
+
+    df_with_rolling["decade"] = (df_with_rolling["year"] // 10) * 10
+
+    # Report the effective date ranges for rolling averages
+    for window_name in windows.keys():
+        col_name = f"{value_column}_{window_name}"
+        valid_data = df_with_rolling.dropna(subset=[col_name])
+        if len(valid_data) > 0:
+            min_year = valid_data["year"].min()
+            max_year = valid_data["year"].max()
+            print(
+                f"    {col_name}: {min_year}-{max_year} ({len(valid_data):,} valid data points)"
+            )
+        else:
+            print(f"    {col_name}: No valid data points")
+
+    print(f"  Added rolling averages and time periods")
+    return df_with_rolling
+
+
+def detect_frequency_from_data(df: pd.DataFrame) -> str:
+    """
+    Detect data frequency (daily or monthly) from date columns.
+
+    Args:
+        df: Wide format dataframe with date columns
+
+    Returns:
+        str: "daily" or "monthly"
+    """
+    # Find date columns
+    date_columns = [col for col in df.columns if "-" in col and len(col) == 10]
+
+    if len(date_columns) < 2:
+        raise ValueError("Need at least 2 date columns to detect frequency")
+
+    # Convert first two date columns to datetime to check interval
+    date1 = pd.to_datetime(date_columns[0])
+    date2 = pd.to_datetime(date_columns[1])
+
+    # Calculate difference in days
+    diff_days = (date2 - date1).days
+
+    if diff_days == 1:
+        return "daily"
+    elif diff_days >= 28 and diff_days <= 31:  # Allow for different month lengths
+        return "monthly"
+    else:
+        # Check a few more date columns to be sure
+        if len(date_columns) > 3:
+            date3 = pd.to_datetime(date_columns[2])
+            diff_days_2 = (date3 - date2).days
+
+            # Check if it's consistently daily or monthly
+            if diff_days == diff_days_2 == 1:
+                return "daily"
+            elif (28 <= diff_days <= 31) and (28 <= diff_days_2 <= 31):
+                return "monthly"
+
+        raise ValueError(
+            f"Unable to detect frequency. Date intervals: {diff_days} days"
+        )
+
+
+def reshape_to_long_format(
+    df: pd.DataFrame,
+    value_name: str = "qtot",
+    id_columns: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """
+    Reshape from wide format (months as columns) to long format.
+
+    Args:
+        df: Wide format dataframe
+        value_name: Name for the value column in long format
+        id_columns: List of columns to keep as identifiers
+
+    Returns:
+        pd.DataFrame: Long format dataframe
+    """
+    print("Reshaping data to long format...")
+
+    date_columns = [col for col in df.columns if "-" in col and len(col) == 10]
+    date_columns = sorted(date_columns)
+    print(
+        f"Found {len(date_columns)} date columns from {date_columns[0]} to {date_columns[-1]}"
+    )
+
+    if id_columns is None:
+        id_columns = [
+            "BASIN_ID",
+            "BCU_name",
+            "NAME",
+            "REGION",
+            "area_km2",
+            "hydro_model",
+            "climate_model",
+            "ssp_scenario",
+        ]
+
+    available_id_columns = [col for col in id_columns if col in df.columns]
+
+    # Process in chunks to avoid memory issues
+    chunk_size = 1000
+    chunk_results = []
+    num_chunks = (len(date_columns) + chunk_size - 1) // chunk_size
+    print(
+        f"Processing {len(date_columns)} date columns in {num_chunks} chunks of {chunk_size}"
+    )
+
+    try:
+        for i in range(0, len(date_columns), chunk_size):
+            chunk_end = min(i + chunk_size, len(date_columns))
+            chunk_date_cols = date_columns[i:chunk_end]
+            chunk_num = (i // chunk_size) + 1
+
+            print(
+                f"Processing chunk {chunk_num}/{num_chunks} ({len(chunk_date_cols)} columns)..."
+            )
+
+            # Create subset with ID columns and current chunk of date columns
+            chunk_cols = available_id_columns + chunk_date_cols
+            chunk_df = df[chunk_cols].copy()
+
+            # Melt this chunk
+            long_chunk = pd.melt(
+                chunk_df,
+                id_vars=available_id_columns,
+                value_vars=chunk_date_cols,
+                var_name="date",
+                value_name=value_name,
+            )
+
+            # Process dates for this chunk
+            long_chunk["date"] = pd.to_datetime(long_chunk["date"])
+            long_chunk["year"] = long_chunk["date"].dt.year
+            long_chunk["month"] = long_chunk["date"].dt.month
+
+            # Remove NAs
+            long_chunk = long_chunk.dropna(subset=[value_name])
+
+            chunk_results.append(long_chunk)
+
+            # Clean up
+            del chunk_df, long_chunk
+            gc.collect()
+
+            print(f"Chunk {chunk_num} completed")
+
+        print("Combining all chunks...")
+        long_df = pd.concat(chunk_results, ignore_index=True)
+
+        # Clean up chunk results
+        del chunk_results
+        gc.collect()
+
+        print(f"Final dataset: {len(long_df)} rows")
+        return long_df
+
+    except Exception as e:
+        print(f"ERROR in reshape_to_long_format: {e}")
+        print(f"Available ID columns: {available_id_columns}")
+        print(f"Number of date columns: {len(date_columns)}")
+        print(f"DataFrame shape: {df.shape}")
+        raise
+
+
+def prepare_data(
+    data_dir: Union[str, Path],
+    output_file: Optional[Union[str, Path]] = None,
+    variable: str = "qtot",
+    frequency: str = "daily",  # Changed default to daily
+    hydro_models: Optional[List[str]] = None,
+    climate_models: Optional[List[str]] = None,
+    ssp_scenarios: Optional[List[str]] = None,
+    time_period: str = "future",
+    drop_percentile: float = 0,
+    outlier_threshold: float = 1e15,
+    rolling_windows: Optional[Dict[str, int]] = None,
+) -> pd.DataFrame:
+    """
+    Main data preparation pipeline.
+
+    Args:
+        data_dir: Directory containing the CSV files
+        output_file: Optional path to save the prepared data
+        variable: Variable name (default: "qtot")
+        frequency: Data frequency ("daily" or "monthly")
+        hydro_models: List of hydro models (auto-discover if None)
+        climate_models: List of climate models (auto-discover if None)
+        ssp_scenarios: List of SSP scenarios (default: ssp126, ssp370, ssp585)
+        time_period: Time period (default: "future")
+        drop_percentile: Percentile threshold for dropping low-value basins
+        outlier_threshold: Upper threshold for outlier removal
+        rolling_windows: Dictionary of rolling window sizes (auto-adjusted by frequency if None)
+
+    Returns:
+        pd.DataFrame: Prepared long-format dataframe
+    """
+    combined_data = load_var_data(
+        data_dir,
+        variable,
+        frequency,
+        hydro_models,
+        climate_models,
+        ssp_scenarios,
+        time_period,
+    )
+
+    long_data = reshape_to_long_format(combined_data, value_name=variable)
+
+    long_data = clean_outliers(
+        long_data, value_column=variable, threshold=outlier_threshold
+    )
+
+    long_data = filter_basins_by_runoff(
+        long_data, value_column=variable, drop_percentile=drop_percentile
+    )
+
+    long_data = compute_rolling_averages(
+        long_data, value_column=variable, frequency=frequency, windows=rolling_windows
+    )
+
+    if output_file:
+        output_file = Path(output_file)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        long_data.to_csv(output_file, index=False)
+        print(f"Saved prepared data to {output_file}")
+
+    return long_data
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Prepare hydro model data for analysis"
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default="/home/raghunathan/hydro_preprocess/pre_processing/unicc_output_deux",
+        help="Directory containing CSV files",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="/home/raghunathan/hydro_preprocess/anova_results/combined_long_data_new.csv",
+        help="Output file path",
+    )
+    parser.add_argument(
+        "--variable", type=str, default="qtot", help="Variable name to process"
+    )
+    parser.add_argument(
+        "--frequency",
+        type=str,
+        default="daily",  # Changed default to daily
+        choices=["daily", "monthly"],
+        help="Data frequency (daily or monthly)",
+    )
+    parser.add_argument(
+        "--drop-percentile",
+        type=float,
+        default=10,
+        help="Percentile threshold for dropping low-value basins (0-100)",
+    )
+    parser.add_argument(
+        "--outlier-threshold",
+        type=float,
+        default=1e15,
+        help="Upper threshold for outlier removal",
+    )
+
+    args = parser.parse_args()
+
+    prepare_data(
+        data_dir=args.data_dir,
+        output_file=args.output,
+        variable=args.variable,
+        frequency=args.frequency,
+        drop_percentile=args.drop_percentile,
+        outlier_threshold=args.outlier_threshold,
+    )
