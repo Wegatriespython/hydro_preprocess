@@ -1,0 +1,41 @@
+Test Data Configuration
+======================
+
+Fixed Parameters (non-varying across all test files):
+---------------------------------------------------
+isimip_version: 3b
+climate_model: gfdl-esm4
+scenario: ssp126
+data_period: future
+region: R12
+iso3: ZMB
+spatial_method: sum
+basin_shapefile: /home/raghunathan/ISIMIP/basins_delineated/basins_by_region_simpl_R12.shp
+area_file: /mnt/p/ene.model/NEST/Hydrology/landareamaskmap0.nc
+
+Test File Configurations:
+------------------------
+
+1. qtot_monthly_test_data.nc
+   Variable: qtot
+   Temporal Resolution: monthly
+   Time Samples: 2
+   Source: cwatm_gfdl-esm4_w5e5_ssp126_2015soc-from-histsoc_default_qtot_global_monthly_2015_2100.nc
+   Expected Output: qtot_monthly_test_expected_output.csv
+   Test Command: julia hydro_agg_raster.jl --test-file tests/data/qtot_monthly_test_data.nc --variable qtot --temporal-resolution monthly --output-dir test_output
+
+2. qtot_daily_test_data.nc
+   Variable: qtot
+   Temporal Resolution: daily
+   Time Samples: 30
+   Source: cwatm_gfdl-esm4_w5e5_ssp126_2015soc-from-histsoc_default_qtot_global_daily_2015_2020.nc
+   Expected Output: qtot_daily_test_expected_output.csv
+   Test Command: julia hydro_agg_raster.jl --test-file tests/data/qtot_daily_test_data.nc --variable qtot --temporal-resolution daily --output-dir test_output
+
+3. qr_monthly_test_data.nc
+   Variable: qr
+   Temporal Resolution: monthly
+   Time Samples: 2
+   Source: cwatm_gfdl-esm4_w5e5_ssp126_2015soc-from-histsoc_default_qr_global_monthly_2015_2100.nc
+   Expected Output: qr_monthly_test_expected_output.csv
+   Test Command: julia hydro_agg_raster.jl --test-file tests/data/qr_monthly_test_data.nc --variable qr --temporal-resolution monthly --output-dir test_output
