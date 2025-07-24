@@ -3,7 +3,7 @@
 Timeseries Visualization for Representative Basins
 =================================================
 
-Creates timeseries plots showing temporal patterns in qtot_30yr for representative basins.
+Creates timeseries plots showing temporal patterns in var for representative basins.
 Two plot types:
 1. Grouped by SSP scenario (models as shaded regions)
 2. Grouped by climate model (SSPs as shaded regions)
@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import warnings
+import argparse
 
 warnings.filterwarnings("ignore")
 
@@ -50,7 +51,7 @@ SSP_SCENARIOS = ["ssp126", "ssp370", "ssp585"]
 # Color schemes
 SSP_COLORS = {
     "ssp126": "#1f77b4",  # Blue - low emissions
-    "ssp370": "#ff7f0e",  # Orange - medium emissions
+    "ssp370": "#2ca02c",  # Green - medium emissions
     "ssp585": "#d62728",  # Red - high emissions
 }
 
@@ -63,11 +64,11 @@ MODEL_COLORS = {
 }
 
 
-def load_timeseries_data():
+def load_timeseries_data(var):
     """Load the combined long-format data with all basins."""
     print("Loading timeseries data...")
 
-    data_file = DATA_DIR / "combined_long_data.csv"
+    data_file = DATA_DIR / f"qtot_p_cleaned.csv"
     if not data_file.exists():
         raise FileNotFoundError(f"Data file not found: {data_file}")
 
@@ -81,7 +82,7 @@ def load_timeseries_data():
     return df
 
 
-def find_representative_basins(df):
+def find_representative_basins(df, var="qtot_30yr"):
     """Find basin IDs for representative basin names."""
     print("Finding representative basins...")
 
@@ -108,7 +109,7 @@ def find_representative_basins(df):
     return basin_matches
 
 
-def create_annual_timeseries(df, basin_matches):
+def create_annual_timeseries(df, basin_matches, var="qtot_30yr"):
     """Create annual timeseries for easier visualization."""
     print("Creating annual timeseries...")
 
@@ -127,21 +128,25 @@ def create_annual_timeseries(df, basin_matches):
 
     annual_data = (
         df_filtered.groupby(grouping_cols)
-        .agg({"qtot_30yr": "mean", "REGION": "first"})
+        .agg({f"{var}": "mean", "REGION": "first"})
         .reset_index()
     )
 
-    print(f"Created annual data: {len(annual_data)} basin-model-scenario-year combinations")
-    
+    print(
+        f"Created annual data: {len(annual_data)} basin-model-scenario-year combinations"
+    )
+
     # Show available hydro models if present
     if "hydro_model" in annual_data.columns:
         hydro_models = annual_data["hydro_model"].unique()
         print(f"Available hydro models: {hydro_models}")
-    
+
     return annual_data
 
 
-def plot_ssp_grouped_timeseries(annual_data, basin_matches, save_plots=True):
+def plot_ssp_grouped_timeseries(
+    annual_data, basin_matches, save_plots=True, var="qtot_30yr"
+):
     """
     Create timeseries plots grouped by SSP scenario.
     Each SSP gets a shaded region representing model spread.
@@ -179,7 +184,7 @@ def plot_ssp_grouped_timeseries(annual_data, basin_matches, save_plots=True):
 
             # Calculate model spread (min/max envelope)
             yearly_stats = (
-                ssp_data.groupby("year")["qtot_30yr"]
+                ssp_data.groupby("year")[f"{var}"]
                 .agg(["min", "max", "mean", "std"])
                 .reset_index()
             )
@@ -206,7 +211,7 @@ def plot_ssp_grouped_timeseries(annual_data, basin_matches, save_plots=True):
 
         ax.set_title(f"{target_basin}\n{basin_name[:30]}", fontsize=10)
         ax.set_xlabel("Year")
-        ax.set_ylabel("qtot_30yr")
+        ax.set_ylabel(f"{var}")
         ax.grid(True, alpha=0.3)
 
         # Add legend only for first subplot
@@ -232,7 +237,9 @@ def plot_ssp_grouped_timeseries(annual_data, basin_matches, save_plots=True):
     plt.show()
 
 
-def plot_model_grouped_timeseries(annual_data, basin_matches, save_plots=True):
+def plot_model_grouped_timeseries(
+    annual_data, basin_matches, save_plots=True, var="qtot_30yr"
+):
     """
     Create timeseries plots grouped by climate model.
     Each model gets a shaded region representing SSP spread.
@@ -270,7 +277,7 @@ def plot_model_grouped_timeseries(annual_data, basin_matches, save_plots=True):
 
             # Calculate SSP spread (min/max envelope)
             yearly_stats = (
-                model_data.groupby("year")["qtot_30yr"]
+                model_data.groupby("year")[f"{var}"]
                 .agg(["min", "max", "mean", "std"])
                 .reset_index()
             )
@@ -297,7 +304,7 @@ def plot_model_grouped_timeseries(annual_data, basin_matches, save_plots=True):
 
         ax.set_title(f"{target_basin}\n{basin_name[:30]}", fontsize=10)
         ax.set_xlabel("Year")
-        ax.set_ylabel("qtot_30yr")
+        ax.set_ylabel(f"{var}")
         ax.grid(True, alpha=0.3)
 
         # Add legend only for first subplot
@@ -323,7 +330,9 @@ def plot_model_grouped_timeseries(annual_data, basin_matches, save_plots=True):
     plt.show()
 
 
-def plot_hydro_grouped_timeseries(annual_data, basin_matches, save_plots=True):
+def plot_hydro_grouped_timeseries(
+    annual_data, basin_matches, save_plots=True, var="qtot_30yr"
+):
     """
     Create timeseries plots grouped by hydro model.
     Each hydro model gets a shaded region representing climate model and SSP spread.
@@ -334,19 +343,20 @@ def plot_hydro_grouped_timeseries(annual_data, basin_matches, save_plots=True):
         return
 
     print("Creating hydro-grouped timeseries plots...")
-    
+
     # Define colors for hydro models
     hydro_models = annual_data["hydro_model"].unique()
     hydro_colors = {
         "CWatM": "#1f77b4",
-        "H08": "#ff7f0e", 
+        "H08": "#ff7f0e",
         "MIROC-INTEG-LAND": "#2ca02c",
         "WaterGAP2-2e": "#d62728",
         "JULES-W2": "#9467bd",
     }
-    
+
     # Use default colors for any models not in our predefined set
     import matplotlib.pyplot as plt
+
     default_colors = plt.cm.Set1(np.linspace(0, 1, len(hydro_models)))
     for i, model in enumerate(hydro_models):
         if model not in hydro_colors:
@@ -368,7 +378,9 @@ def plot_hydro_grouped_timeseries(annual_data, basin_matches, save_plots=True):
         basin_data = annual_data[annual_data["BASIN_ID"] == basin_id]
 
         if len(basin_data) == 0:
-            ax.text(0.5, 0.5, "No Data", ha="center", va="center", transform=ax.transAxes)
+            ax.text(
+                0.5, 0.5, "No Data", ha="center", va="center", transform=ax.transAxes
+            )
             ax.set_title(f"{target_basin}\n(No Data)")
             continue
 
@@ -381,7 +393,7 @@ def plot_hydro_grouped_timeseries(annual_data, basin_matches, save_plots=True):
 
             # Calculate spread across climate models and SSPs (min/max envelope)
             yearly_stats = (
-                hydro_data.groupby("year")["qtot_30yr"]
+                hydro_data.groupby("year")[f"{var}"]
                 .agg(["min", "max", "mean", "std"])
                 .reset_index()
             )
@@ -408,7 +420,7 @@ def plot_hydro_grouped_timeseries(annual_data, basin_matches, save_plots=True):
 
         ax.set_title(f"{target_basin}\n{basin_name[:30]}", fontsize=10)
         ax.set_xlabel("Year")
-        ax.set_ylabel("qtot_30yr")
+        ax.set_ylabel(f"{var}")
         ax.grid(True, alpha=0.3)
 
         # Add legend only for first subplot
@@ -426,13 +438,15 @@ def plot_hydro_grouped_timeseries(annual_data, basin_matches, save_plots=True):
     plt.tight_layout()
 
     if save_plots:
-        plt.savefig(PLOTS_DIR / "hydro_grouped_timeseries.png", dpi=300, bbox_inches="tight")
+        plt.savefig(
+            PLOTS_DIR / "hydro_grouped_timeseries.png", dpi=300, bbox_inches="tight"
+        )
         plt.savefig(PLOTS_DIR / "hydro_grouped_timeseries.pdf", bbox_inches="tight")
 
     plt.show()
 
 
-def create_summary_statistics_plots(annual_data, basin_matches):
+def create_summary_statistics_plots(annual_data, basin_matches, var="qtot_30yr"):
     """Create summary plots showing variance patterns."""
     print("Creating summary statistics plots...")
 
@@ -447,24 +461,28 @@ def create_summary_statistics_plots(annual_data, basin_matches):
             continue
 
         # Calculate total variance and components
-        total_var = basin_data["qtot_30yr"].var()
+        total_var = basin_data[f"{var}"].var()
 
         # SSP variance (between scenarios)
-        ssp_means = basin_data.groupby("ssp_scenario")["qtot_30yr"].mean()
+        ssp_means = basin_data.groupby("ssp_scenario")[f"{var}"].mean()
         ssp_var = ssp_means.var() if len(ssp_means) > 1 else 0
 
         # Climate model variance (between climate models)
-        climate_model_means = basin_data.groupby("climate_model")["qtot_30yr"].mean()
-        climate_model_var = climate_model_means.var() if len(climate_model_means) > 1 else 0
+        climate_model_means = basin_data.groupby("climate_model")[f"{var}"].mean()
+        climate_model_var = (
+            climate_model_means.var() if len(climate_model_means) > 1 else 0
+        )
 
         # Hydro model variance (between hydro models) if available
         hydro_model_var = 0
         if "hydro_model" in basin_data.columns:
-            hydro_model_means = basin_data.groupby("hydro_model")["qtot_30yr"].mean()
-            hydro_model_var = hydro_model_means.var() if len(hydro_model_means) > 1 else 0
+            hydro_model_means = basin_data.groupby("hydro_model")[f"{var}"].mean()
+            hydro_model_var = (
+                hydro_model_means.var() if len(hydro_model_means) > 1 else 0
+            )
 
         # Year variance (temporal trend)
-        year_means = basin_data.groupby("year")["qtot_30yr"].mean()
+        year_means = basin_data.groupby("year")[f"{var}"].mean()
         year_var = year_means.var() if len(year_means) > 1 else 0
 
         variance_entry = {
@@ -475,17 +493,23 @@ def create_summary_statistics_plots(annual_data, basin_matches):
             "climate_model_variance": climate_model_var,
             "year_variance": year_var,
             "ssp_pct": (ssp_var / total_var * 100) if total_var > 0 else 0,
-            "climate_model_pct": (climate_model_var / total_var * 100) if total_var > 0 else 0,
+            "climate_model_pct": (climate_model_var / total_var * 100)
+            if total_var > 0
+            else 0,
             "year_pct": (year_var / total_var * 100) if total_var > 0 else 0,
         }
-        
+
         # Add hydro model variance if available
         if "hydro_model" in basin_data.columns:
-            variance_entry.update({
-                "hydro_model_variance": hydro_model_var,
-                "hydro_model_pct": (hydro_model_var / total_var * 100) if total_var > 0 else 0,
-            })
-        
+            variance_entry.update(
+                {
+                    "hydro_model_variance": hydro_model_var,
+                    "hydro_model_pct": (hydro_model_var / total_var * 100)
+                    if total_var > 0
+                    else 0,
+                }
+            )
+
         variance_data.append(variance_entry)
 
     if not variance_data:
@@ -502,28 +526,77 @@ def create_summary_statistics_plots(annual_data, basin_matches):
     ssp_pct = variance_df["ssp_pct"]
     climate_model_pct = variance_df["climate_model_pct"]
     year_pct = variance_df["year_pct"]
-    
+
     # Check if hydro model data is available
     has_hydro_models = "hydro_model_pct" in variance_df.columns
-    
+
     if has_hydro_models:
         hydro_model_pct = variance_df["hydro_model_pct"]
         residual_pct = 100 - (ssp_pct + climate_model_pct + hydro_model_pct + year_pct)
-        
+
         # Stack bars with hydro model included
         ax1.bar(basins, ssp_pct, label="SSP Scenarios", color="skyblue", alpha=0.8)
-        ax1.bar(basins, climate_model_pct, bottom=ssp_pct, label="Climate Models", color="lightcoral", alpha=0.8)
-        ax1.bar(basins, hydro_model_pct, bottom=ssp_pct + climate_model_pct, label="Hydro Models", color="orange", alpha=0.8)
-        ax1.bar(basins, year_pct, bottom=ssp_pct + climate_model_pct + hydro_model_pct, label="Temporal Trend", color="lightgreen", alpha=0.8)
-        ax1.bar(basins, residual_pct, bottom=ssp_pct + climate_model_pct + hydro_model_pct + year_pct, label="Residual", color="lightgray", alpha=0.8)
+        ax1.bar(
+            basins,
+            climate_model_pct,
+            bottom=ssp_pct,
+            label="Climate Models",
+            color="lightcoral",
+            alpha=0.8,
+        )
+        ax1.bar(
+            basins,
+            hydro_model_pct,
+            bottom=ssp_pct + climate_model_pct,
+            label="Hydro Models",
+            color="orange",
+            alpha=0.8,
+        )
+        ax1.bar(
+            basins,
+            year_pct,
+            bottom=ssp_pct + climate_model_pct + hydro_model_pct,
+            label="Temporal Trend",
+            color="lightgreen",
+            alpha=0.8,
+        )
+        ax1.bar(
+            basins,
+            residual_pct,
+            bottom=ssp_pct + climate_model_pct + hydro_model_pct + year_pct,
+            label="Residual",
+            color="lightgray",
+            alpha=0.8,
+        )
     else:
         residual_pct = 100 - (ssp_pct + climate_model_pct + year_pct)
-        
+
         # Stack bars without hydro model
         ax1.bar(basins, ssp_pct, label="SSP Scenarios", color="skyblue", alpha=0.8)
-        ax1.bar(basins, climate_model_pct, bottom=ssp_pct, label="Climate Models", color="lightcoral", alpha=0.8)
-        ax1.bar(basins, year_pct, bottom=ssp_pct + climate_model_pct, label="Temporal Trend", color="lightgreen", alpha=0.8)
-        ax1.bar(basins, residual_pct, bottom=ssp_pct + climate_model_pct + year_pct, label="Residual", color="lightgray", alpha=0.8)
+        ax1.bar(
+            basins,
+            climate_model_pct,
+            bottom=ssp_pct,
+            label="Climate Models",
+            color="lightcoral",
+            alpha=0.8,
+        )
+        ax1.bar(
+            basins,
+            year_pct,
+            bottom=ssp_pct + climate_model_pct,
+            label="Temporal Trend",
+            color="lightgreen",
+            alpha=0.8,
+        )
+        ax1.bar(
+            basins,
+            residual_pct,
+            bottom=ssp_pct + climate_model_pct + year_pct,
+            label="Residual",
+            color="lightgray",
+            alpha=0.8,
+        )
 
     ax1.set_ylabel("Variance Explained (%)")
     ax1.set_title("Variance Decomposition by Basin")
@@ -552,50 +625,65 @@ def create_summary_statistics_plots(annual_data, basin_matches):
 
 def main():
     """Main visualization function."""
-
+    parser = argparse.ArgumentParser(description="Generate timeseries for variables")
+    parser.add_argument(
+        "--clim_model_spread",
+        action="store_true",
+        default=False,
+        help="Plot spread along climate models",
+    )
+    parser.add_argument(
+        "--hydro_model_spread",
+        action="store_true",
+        default=False,
+        help="Plot spread among hydrology models",
+    )
+    parser.add_argument(
+        "--ssp_spread",
+        action="store_true",
+        default=False,
+        help="Timeseries plot of spread in RCP forcing among models.",
+    )
+    parser.add_argument(
+        "--var", type=str, default="qtot_30yr", help="var to plot for timeseries"
+    )
+    args = parser.parse_args()
     print("=" * 60)
     print("TIMESERIES VISUALIZATION FOR REPRESENTATIVE BASINS")
     print("=" * 60)
-
+    var = args.var
     try:
         # Load data
-        df = load_timeseries_data()
+        df = load_timeseries_data(var)
 
         # Find representative basins
-        basin_matches = find_representative_basins(df)
+        basin_matches = find_representative_basins(df, var)
 
         if not basin_matches:
             print("No representative basins found!")
             return
 
         # Create annual timeseries
-        annual_data = create_annual_timeseries(df, basin_matches)
+        annual_data = create_annual_timeseries(df, basin_matches, var)
 
         # Create SSP-grouped plots
-        plot_ssp_grouped_timeseries(annual_data, basin_matches)
+        if args.ssp_spread:
+            plot_ssp_grouped_timeseries(annual_data, basin_matches, var)
 
         # Create climate model-grouped plots
-        plot_model_grouped_timeseries(annual_data, basin_matches)
-        
+        if args.clim_model_spread:
+            plot_model_grouped_timeseries(annual_data, basin_matches, var)
+
         # Create hydro model-grouped plots (if hydro models are available)
-        plot_hydro_grouped_timeseries(annual_data, basin_matches)
+        if args.hydro_model_spread:
+            plot_hydro_grouped_timeseries(annual_data, basin_matches, var)
 
         # Create summary statistics
-        variance_df = create_summary_statistics_plots(annual_data, basin_matches)
+        # variance_df = create_summary_statistics_plots(annual_data, basin_matches, var)
 
-        # Save variance summary
-        if variance_df is not None:
-            variance_df.to_csv(PLOTS_DIR / "basin_variance_summary.csv", index=False)
-
-        print(f"\nVisualization complete!")
-        print(f"Plots saved to: {PLOTS_DIR}/")
-        print("Files created:")
-        print("- ssp_grouped_timeseries.png/pdf")
-        print("- model_grouped_timeseries.png/pdf")
-        if "hydro_model" in annual_data.columns:
-            print("- hydro_grouped_timeseries.png/pdf")
-        print("- variance_decomposition_by_basin.png")
-        print("- basin_variance_summary.csv")
+        # # Save variance summary
+        # if variance_df is not None:
+        #     variance_df.to_csv(PLOTS_DIR / "basin_variance_summary.csv", index=False)
 
     except Exception as e:
         print(f"Error in visualization: {e}")
@@ -604,4 +692,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
