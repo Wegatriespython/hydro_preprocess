@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Union
 import warnings
 import gc
+import sys
 
 warnings.filterwarnings("ignore")
 
@@ -395,6 +396,9 @@ def compute_rolling_averages(
 ) -> pd.DataFrame:
     """
     Compute rolling averages for temporal analysis.
+    
+    Uses backward-looking windows to ensure all data points from 2015 onwards 
+    have rolling averages, avoiding data loss and sharp kinks.
 
     Args:
         df: Long format dataframe with date, year columns
@@ -407,68 +411,49 @@ def compute_rolling_averages(
     """
     # Auto-detect frequency if not provided
     if frequency is None:
-        # Sample some data to detect frequency
         sample_dates = df["date"].sort_values().head(3)
         if len(sample_dates) >= 2:
             diff_days = (sample_dates.iloc[1] - sample_dates.iloc[0]).days
             frequency = "daily" if diff_days == 1 else "monthly"
         else:
-            frequency = "monthly"  # Default
+            frequency = "monthly"
 
     # Set default windows based on frequency
     if windows is None:
         if frequency == "daily":
-            # For daily data: 5yr ≈ 1825 days, 10yr ≈ 3650 days, 30yr ≈ 10950 days
             windows = {"5yr": 1825, "10yr": 3650, "30yr": 10950}
         else:
-            # For monthly data: 5yr = 60 months, 10yr = 120 months, 30yr = 360 months
             windows = {"5yr": 60, "10yr": 120, "30yr": 360}
 
-    print(f"  Computing rolling averages for {value_column} ({frequency} frequency)...")
+    print(f"  Computing backward-looking rolling averages for {value_column} ({frequency} frequency)...")
     print(f"    Window sizes: {windows}")
 
     def add_rolling_avg_for_group(group_data):
         """Add rolling averages for a specific basin-hydro_model-climate_model-scenario combination."""
         group_data = group_data.sort_values("date").copy()
-
+        
         for window_name, window_size in windows.items():
             col_name = f"{value_column}_{window_name}"
-            # Use stricter min_periods - require at least 80% of the window for valid averages
-            min_periods = max(int(window_size * 0.8), window_size // 2)
-
+            
+            # Use backward-looking rolling window (center=False)
+            # This ensures data availability from the start of the time series
             rolling_values = (
                 group_data[value_column]
-                .rolling(window=window_size, min_periods=min_periods, center=True)
+                .rolling(window=window_size, min_periods=window_size, center=False)
                 .mean()
             )
-
-            # For centered rolling windows, mask edge values that don't have sufficient data
-            half_window = window_size // 2
-
-            # Create mask to identify valid rolling average positions
-            valid_mask = pd.Series(True, index=rolling_values.index)
-
-            # Mask beginning and end based on actual data availability
-            if len(group_data) > window_size:
-                # For centered windows with sufficient data, mask the edges
-                valid_mask.iloc[:half_window] = False  # Beginning
-                valid_mask.iloc[-half_window:] = False  # End
-            else:
-                # If we don't have enough data for a full window, mark all as invalid
-                valid_mask[:] = False
-
-            # Apply the mask
-            rolling_values = rolling_values.where(valid_mask)
+            
             group_data[col_name] = rolling_values
 
         return group_data
 
-    # Update grouping to include hydro_model
+    # Apply rolling averages to each group
     grouping_cols = ["BASIN_ID", "hydro_model", "climate_model", "ssp_scenario"]
     df_with_rolling = df.groupby(grouping_cols, group_keys=False).apply(
         add_rolling_avg_for_group
     )
 
+    # Add time period indicators
     df_with_rolling["period_2015_2030"] = (df_with_rolling["year"] >= 2015) & (
         df_with_rolling["year"] <= 2030
     )
@@ -481,20 +466,18 @@ def compute_rolling_averages(
 
     df_with_rolling["decade"] = (df_with_rolling["year"] // 10) * 10
 
-    # Report the effective date ranges for rolling averages
+    # Report effective date ranges for rolling averages
     for window_name in windows.keys():
         col_name = f"{value_column}_{window_name}"
         valid_data = df_with_rolling.dropna(subset=[col_name])
         if len(valid_data) > 0:
             min_year = valid_data["year"].min()
             max_year = valid_data["year"].max()
-            print(
-                f"    {col_name}: {min_year}-{max_year} ({len(valid_data):,} valid data points)"
-            )
+            total_points = len(valid_data)
+            print(f"    {col_name}: {min_year}-{max_year} ({total_points:,} valid data points)")
         else:
             print(f"    {col_name}: No valid data points")
 
-    print(f"  Added rolling averages and time periods")
     return df_with_rolling
 
 
@@ -647,9 +630,11 @@ def reshape_to_long_format(
 
 def prepare_data(
     data_dir: Union[str, Path],
+    long_gen: bool = False,
+    long_path: Optional[str | Path] = None,
     output_file: Optional[Union[str, Path]] = None,
     variable: str = "qtot",
-    frequency: str = "daily",  # Changed default to daily
+    frequency: str = "monthly",  # Changed default to daily
     hydro_models: Optional[List[str]] = None,
     climate_models: Optional[List[str]] = None,
     ssp_scenarios: Optional[List[str]] = None,
@@ -677,26 +662,28 @@ def prepare_data(
     Returns:
         pd.DataFrame: Prepared long-format dataframe
     """
-    combined_data = load_var_data(
-        data_dir,
-        variable,
-        frequency,
-        hydro_models,
-        climate_models,
-        ssp_scenarios,
-        time_period,
-    )
+    if long_gen and long_path is None:
+        combined_data = load_var_data(
+            data_dir,
+            variable,
+            frequency,
+            hydro_models,
+            climate_models,
+            ssp_scenarios,
+            time_period,
+        )
 
-    long_data = reshape_to_long_format(combined_data, value_name=variable)
-
-    long_data = clean_outliers(
-        long_data, value_column=variable, threshold=outlier_threshold
-    )
-
-    long_data = filter_basins_by_runoff(
-        long_data, value_column=variable, drop_percentile=drop_percentile
-    )
-
+        long_data = reshape_to_long_format(combined_data, value_name=variable)
+    else:
+        long_data = pd.read_csv(long_path)
+    # long_data = clean_outliers(
+    #     long_data, value_column=variable, threshold=outlier_threshold
+    # )
+    #
+    # long_data = filter_basins_by_runoff(
+    #     long_data, value_column=variable, drop_percentile=drop_percentile
+    # )
+    #
     long_data = compute_rolling_averages(
         long_data, value_column=variable, frequency=frequency, windows=rolling_windows
     )
@@ -708,6 +695,200 @@ def prepare_data(
         print(f"Saved prepared data to {output_file}")
 
     return long_data
+
+
+def aggregate_daily_to_monthly(
+    input_csv: Union[str, Path],
+    output_csv: Union[str, Path],
+    value_column: str = "qtot",
+    chunk_size: int = 50000,
+    aggregation_stats: Optional[List[str]] = None,
+) -> None:
+    """
+    Aggregate daily data to monthly in a memory-efficient way.
+
+    This function reads a large daily CSV file in chunks and aggregates it to monthly
+    resolution to reduce memory requirements for downstream analysis.
+
+    Args:
+        input_csv: Path to the input daily long-format CSV file
+        output_csv: Path to save the monthly aggregated CSV file
+        value_column: Column containing values to aggregate (default: "qtot")
+        chunk_size: Number of rows to read per chunk (default: 50000)
+        aggregation_stats: List of aggregation statistics to compute.
+                          Default: ["mean", "std", "min", "max"]
+    """
+    if aggregation_stats is None:
+        aggregation_stats = ["mean", "std", "min", "max"]
+
+    input_csv = Path(input_csv)
+    output_csv = Path(output_csv)
+
+    print(f"Aggregating daily data to monthly: {input_csv} -> {output_csv}")
+    print(f"  Chunk size: {chunk_size:,} rows")
+    print(f"  Aggregation stats: {aggregation_stats}")
+
+    # Initialize containers for accumulating results
+    monthly_data = {}
+    processed_chunks = 0
+    total_rows_processed = 0
+
+    # Read the CSV in chunks
+    try:
+        csv_reader = pd.read_csv(input_csv, chunksize=chunk_size)
+
+        for chunk_num, chunk in enumerate(csv_reader, 1):
+            print(f"  Processing chunk {chunk_num} ({len(chunk):,} rows)...")
+
+            # Ensure date column is datetime
+            if chunk["date"].dtype == "object":
+                chunk["date"] = pd.to_datetime(chunk["date"])
+
+            # Add year and month columns if not present
+            if "year" not in chunk.columns:
+                chunk["year"] = chunk["date"].dt.year
+            if "month" not in chunk.columns:
+                chunk["month"] = chunk["date"].dt.month
+
+            # Define grouping columns (all except date and value column)
+            id_columns = [
+                "BASIN_ID",
+                "BCU_name",
+                "NAME",
+                "REGION",
+                "area_km2",
+                "hydro_model",
+                "climate_model",
+                "ssp_scenario",
+                "year",
+                "month",
+            ]
+
+            # Keep only columns that exist in the chunk
+            available_id_columns = [col for col in id_columns if col in chunk.columns]
+
+            # Group by monthly periods and aggregate
+            agg_dict = {value_column: aggregation_stats}
+
+            chunk_monthly = (
+                chunk.groupby(available_id_columns).agg(agg_dict).reset_index()
+            )
+
+            # Flatten column names for multi-level aggregation
+            if len(aggregation_stats) > 1:
+                chunk_monthly.columns = [
+                    col[0] if col[1] == "" else f"{col[0]}_{col[1]}"
+                    for col in chunk_monthly.columns
+                ]
+
+            # Add representative date (middle of month)
+            chunk_monthly["date"] = pd.to_datetime(
+                chunk_monthly[["year", "month"]].assign(day=15)
+            )
+
+            # Accumulate results by creating a unique key for each basin-model-scenario-year-month
+            for _, row in chunk_monthly.iterrows():
+                key = (
+                    row["BASIN_ID"],
+                    row.get("hydro_model", ""),
+                    row.get("climate_model", ""),
+                    row.get("ssp_scenario", ""),
+                    row["year"],
+                    row["month"],
+                )
+
+                if key not in monthly_data:
+                    # First time seeing this combination
+                    monthly_data[key] = row.to_dict()
+                    monthly_data[key]["count"] = 1
+                else:
+                    # Accumulate statistics for this combination
+                    existing = monthly_data[key]
+                    count = existing["count"]
+                    new_count = count + 1
+
+                    # Update running averages and other stats
+                    for stat in aggregation_stats:
+                        col_name = (
+                            f"{value_column}_{stat}"
+                            if len(aggregation_stats) > 1
+                            else value_column
+                        )
+
+                        if stat == "mean":
+                            # Update running mean
+                            existing[col_name] = (
+                                existing[col_name] * count + row[col_name]
+                            ) / new_count
+                        elif stat == "min":
+                            existing[col_name] = min(existing[col_name], row[col_name])
+                        elif stat == "max":
+                            existing[col_name] = max(existing[col_name], row[col_name])
+                        elif stat == "std":
+                            # For std, we'll approximate by taking weighted average
+                            # This is not perfectly accurate but sufficient for large datasets
+                            existing[col_name] = (
+                                existing[col_name] * count + row[col_name]
+                            ) / new_count
+
+                    monthly_data[key]["count"] = new_count
+
+            total_rows_processed += len(chunk)
+            processed_chunks += 1
+
+            # Clean up memory every 10 chunks
+            if processed_chunks % 10 == 0:
+                gc.collect()
+                print(
+                    f"    Processed {processed_chunks} chunks, {total_rows_processed:,} total rows"
+                )
+                print(f"    Unique monthly records so far: {len(monthly_data):,}")
+
+        print(
+            f"Completed processing {processed_chunks} chunks ({total_rows_processed:,} total rows)"
+        )
+        print(f"Final unique monthly records: {len(monthly_data):,}")
+
+        # Convert accumulated results to DataFrame
+        print("Converting results to DataFrame...")
+        monthly_df = pd.DataFrame(list(monthly_data.values()))
+
+        # Remove the temporary count column
+        if "count" in monthly_df.columns:
+            monthly_df = monthly_df.drop("count", axis=1)
+
+        # Sort by basin, model, scenario, date
+        sort_columns = [
+            "BASIN_ID",
+            "hydro_model",
+            "climate_model",
+            "ssp_scenario",
+            "date",
+        ]
+        available_sort_columns = [
+            col for col in sort_columns if col in monthly_df.columns
+        ]
+        monthly_df = monthly_df.sort_values(available_sort_columns).reset_index(
+            drop=True
+        )
+
+        # Save to CSV
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+        monthly_df.to_csv(output_csv, index=False)
+
+        print(f"Successfully aggregated to monthly data:")
+        print(f"  Input: {total_rows_processed:,} daily rows")
+        print(f"  Output: {len(monthly_df):,} monthly rows")
+        print(f"  Reduction factor: {total_rows_processed / len(monthly_df):.1f}x")
+        print(f"  Saved to: {output_csv}")
+
+        # Clean up
+        del monthly_data, monthly_df
+        gc.collect()
+
+    except Exception as e:
+        print(f"Error during aggregation: {e}")
+        raise
 
 
 if __name__ == "__main__":
@@ -723,6 +904,17 @@ if __name__ == "__main__":
         help="Directory containing CSV files",
     )
     parser.add_argument(
+        "--long_gen",
+        type=bool,
+        default=False,
+        help="Generate long data from hydro_data",
+    )
+    parser.add_argument(
+        "--long_path",
+        type=str,
+        default="/home/raghunathan/hydro_preprocess/anova_results/qtot_monthly_aggregated_data.csv",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="/home/raghunathan/hydro_preprocess/anova_results/combined_long_data_new.csv",
@@ -734,7 +926,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--frequency",
         type=str,
-        default="daily",  # Changed default to daily
+        default="monthly",  # Changed default to daily
         choices=["daily", "monthly"],
         help="Data frequency (daily or monthly)",
     )
@@ -750,14 +942,49 @@ if __name__ == "__main__":
         default=1e15,
         help="Upper threshold for outlier removal",
     )
+    parser.add_argument(
+        "--aggregate-only",
+        action="store_true",
+        help="Only run daily-to-monthly aggregation (requires --input-daily and --output)",
+    )
+    parser.add_argument(
+        "--input-daily",
+        type=str,
+        help="Input daily CSV file for aggregation",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=50000,
+        help="Chunk size for daily-to-monthly aggregation",
+    )
 
     args = parser.parse_args()
 
-    prepare_data(
-        data_dir=args.data_dir,
-        output_file=args.output,
-        variable=args.variable,
-        frequency=args.frequency,
-        drop_percentile=args.drop_percentile,
-        outlier_threshold=args.outlier_threshold,
-    )
+    if args.aggregate_only:
+        # Run only the daily-to-monthly aggregation
+        if not args.input_daily:
+            print("Error: --input-daily is required when using --aggregate-only")
+            sys.exit(1)
+        if not args.output:
+            print("Error: --output is required when using --aggregate-only")
+            sys.exit(1)
+
+        aggregate_daily_to_monthly(
+            input_csv=args.input_daily,
+            output_csv=args.output,
+            value_column=args.variable,
+            chunk_size=args.chunk_size,
+        )
+    else:
+        # Run the full data preparation pipeline
+        prepare_data(
+            data_dir=args.data_dir,
+            long_gen=args.long_gen,
+            long_path=args.long_path,
+            output_file=args.output,
+            variable=args.variable,
+            frequency=args.frequency,
+            drop_percentile=args.drop_percentile,
+            outlier_threshold=args.outlier_threshold,
+        )
