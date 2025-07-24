@@ -94,7 +94,16 @@ end
 """
 Find and validate NetCDF input files based on configuration.
 """
-function find_netcdf_files(config::ProcessingConfig)
+function find_netcdf_files(config::ProcessingConfig; test_file::String="")
+  # If test file is provided, use it directly
+  if !isempty(test_file)
+    if !isfile(test_file)
+      error("Test file not found: $(test_file)")
+    end
+    println("Using test file: $(test_file)")
+    return [test_file]
+  end
+
   println("Searching for NetCDF files...")
 
   # Construct ISIMIP path: base_dir/hydro_model/scenario/climate_model
@@ -360,7 +369,7 @@ end
 """
 Main processing pipeline function.
 """
-function process_hydro_data(config::ProcessingConfig)
+function process_hydro_data(config::ProcessingConfig; test_file::String="")
   println("Starting NetCDF to CSV pipeline...")
   println("Configuration: $(config.variable), $(config.climate_model), $(config.scenario)")
 
@@ -371,7 +380,7 @@ function process_hydro_data(config::ProcessingConfig)
   area_grid = load_area_grid(config)
 
   # Find input NetCDF files
-  netcdf_files = find_netcdf_files(config)
+  netcdf_files = find_netcdf_files(config; test_file=test_file)
 
   # Process NetCDF files
   all_outputs = String[]
@@ -464,6 +473,9 @@ function main()
   s = ArgParseSettings(description="NetCDF to CSV pipeline for MESSAGEix water module")
 
   @add_arg_table! s begin
+    "--test-file"
+    help = "Direct NetCDF file path for testing (bypasses file discovery)"
+    default = ""
     "--variable", "-v"
     help = "Hydrological variable (qtot, dis, qr)"
     default = "qtot"
@@ -549,8 +561,9 @@ function main()
   # Create output directory if it doesn't exist
   mkpath(config.output_dir)
 
-  # Run the pipeline
-  process_hydro_data(config)
+  # Run the pipeline (pass test file if provided)
+  test_file = !isempty(args["test-file"]) ? expand_path(args["test-file"]) : ""
+  process_hydro_data(config; test_file=test_file)
 end
 
 # Run main function if script is executed directly
