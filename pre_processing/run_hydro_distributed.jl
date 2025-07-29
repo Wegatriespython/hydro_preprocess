@@ -46,35 +46,79 @@ add_workers_with_threads(num_workers, threads_per_worker)
   # Functions are now available in Main scope after include
 end
 
+# Ensure all required functions and types are available on workers
+@everywhere begin
+  using Dates, ProgressMeter, ArgParse, YAML
+  using Logging, LoggingExtras
+
+  # Job configuration structure for distributed processing
+  struct JobConfig
+    hydro_model::String
+    climate_model::String
+    scenario::String
+    variable::String
+    temporal_resolution::String
+    job_id::String
+
+    function JobConfig(hydro_model, climate_model, scenario, variable, temporal_resolution)
+      job_id = "hydro_$(hydro_model)_$(climate_model)_$(scenario)_$(variable)_$(temporal_resolution)"
+      new(hydro_model, climate_model, scenario, variable, temporal_resolution, job_id)
+    end
+  end
+
+  # Expand path function (from hydro_agg_raster.jl)
+  function expand_path(path_str::String)
+    expanded = path_str
+    for m in eachmatch(r"\$\{([^}]+)\}", path_str)
+      var_name = m.captures[1]
+      var_value = get(ENV, var_name, "")
+      if isempty(var_value)
+        @warn "Environment variable $(var_name) not found, using empty string"
+      end
+      expanded = replace(expanded, m.match => var_value)
+    end
+    expanded = expanduser(expanded)
+    return normpath(expanded)
+  end
+
+  """
+  Create ProcessingConfig for a specific job.
+  """
+  function create_job_config(job::JobConfig, base_config::ProcessingConfig)
+    return ProcessingConfig(
+      variable=job.variable,
+      isimip_version=base_config.isimip_version,
+      hydro_model=job.hydro_model,
+      climate_model=job.climate_model,
+      scenario=job.scenario,
+      data_period=base_config.data_period,
+      region=base_config.region,
+      iso3=base_config.iso3,
+      temporal_resolution=job.temporal_resolution,
+      spatial_method=base_config.spatial_method,
+      input_dir=base_config.input_dir,
+      area_file=base_config.area_file,
+      basin_shapefile=base_config.basin_shapefile,
+      output_dir=base_config.output_dir
+    )
+  end
+end
+
 # Job configuration matching submit_hydro_jobs.sh
+const HYDRO_MODELS = ["H08", "CWatM", "JULES-W2", "MIROC-INTEG-LAND", "WaterGAP2-2e"] #CWatM  H08  JULES-W2  MIROC-INTEG-LAND  WaterGAP2-2e
 const CLIMATE_MODELS = ["gfdl-esm4", "gfd-cm6a-lr", "ipsl-cm6a-lr", "mpi-esm1-2-hr", "mri-esm2-0", "ukesm1-0-ll"]
 const SCENARIOS = ["ssp126", "ssp370", "ssp585"]
 const VARIABLES_MONTHLY = ["qtot", "qr"]
-const VARIABLES_DAILY = ["qtot"]
+const VARIABLES_DAILY = []
 
-"""
-Job configuration structure for distributed processing.
-"""
-struct JobConfig
-  model::String
-  scenario::String
-  variable::String
-  temporal_resolution::String
-  job_id::String
-
-  function JobConfig(model, scenario, variable, temporal_resolution)
-    job_id = "hydro_$(model)_$(scenario)_$(variable)_$(temporal_resolution)"
-    new(model, scenario, variable, temporal_resolution, job_id)
-  end
-end
 
 """
 Create base ProcessingConfig with common settings.
 """
 function create_base_config(;
-  input_dir="/mnt/p/watxene/ISIMIP/ISIMIP3b/OutputData",
-  basin_shapefile="/home/raghunathan/ISIMIP/basins_delineated/basins_by_region_simpl_R12.shp",
-  area_file="/mnt/p/ene.model/NEST/Hydrology/landareamaskmap0.nc",
+  input_dir="\${WATXENE_DATA_PATH}/ISIMIP/ISIMIP3b/OutputData",
+  basin_shapefile="\${BASIN_SHAPEFILE_PATH}/basins_delineated/basins_by_region_simpl_R12.shp",
+  area_file="\${ENE_MODEL_DATA_PATH}/NEST/hydrology/landareamaskmap0.nc",
   output_dir="./hydro_output",
   data_period="future",
   region="R12",
@@ -85,6 +129,7 @@ function create_base_config(;
   return ProcessingConfig(
     variable="qtot",  # Will be overridden
     isimip_version=isimip_version,
+    hydro_model="H08", # Will be overridden
     climate_model="gfdl-esm4",  # Will be overridden
     scenario="ssp126",  # Will be overridden
     data_period=data_period,
@@ -99,26 +144,6 @@ function create_base_config(;
   )
 end
 
-"""
-Create ProcessingConfig for a specific job.
-"""
-function create_job_config(job::JobConfig, base_config::ProcessingConfig)
-  return ProcessingConfig(
-    variable=job.variable,
-    isimip_version=base_config.isimip_version,
-    climate_model=job.model,
-    scenario=job.scenario,
-    data_period=base_config.data_period,
-    region=base_config.region,
-    iso3=base_config.iso3,
-    temporal_resolution=job.temporal_resolution,
-    spatial_method=base_config.spatial_method,
-    input_dir=base_config.input_dir,
-    area_file=base_config.area_file,
-    basin_shapefile=base_config.basin_shapefile,
-    output_dir=base_config.output_dir
-  )
-end
 
 # Process a single job configuration.
 @everywhere function process_job(job_config::ProcessingConfig, job_id::String)
@@ -145,27 +170,18 @@ end
 """
 Generate all job combinations based on the patterns in submit_hydro_jobs.sh.
 """
-function generate_job_combinations()
+function generate_job_combinations(temporal_resolution)
   jobs = JobConfig[]
-
   # Monthly jobs for all variables
-  for model in CLIMATE_MODELS
-    for scenario in SCENARIOS
-      for variable in VARIABLES_MONTHLY
-        push!(jobs, JobConfig(model, scenario, variable, "monthly"))
+  for hydro_model in HYDRO_MODELS
+    for climate_model in CLIMATE_MODELS
+      for scenario in SCENARIOS
+        for variable in VARIABLES_MONTHLY
+          push!(jobs, JobConfig(hydro_model, climate_model, scenario, variable, temporal_resolution))
+        end
       end
     end
   end
-
-  # Daily jobs for qtot and dis only
-  for model in CLIMATE_MODELS
-    for scenario in SCENARIOS
-      for variable in VARIABLES_DAILY
-        push!(jobs, JobConfig(model, scenario, variable, "daily"))
-      end
-    end
-  end
-
   return jobs
 end
 
@@ -242,9 +258,9 @@ function run_distributed_processing(;
     @info "Loading configuration from: $(config_file)"
     config_dict = YAML.load_file(config_file)
     create_base_config(;
-      input_dir=get(config_dict, "input_dir", "/mnt/p/watxene/ISIMIP/ISIMIP3b/OutputData"),
-      basin_shapefile=get(config_dict, "basin_shapefile", "/home/raghunathan/ISIMIP/basins_delineated/basins_by_region_simpl_R12.shp"),
-      area_file=get(config_dict, "area_file", "/mnt/p/ene.model/NEST/Hydrology/landareamaskmap0.nc"),
+      input_dir=get(config_dict, "input_dir", "\${WATXENE_DATA_PATH}/ISIMIP/ISIMIP3b/OutputData"),
+      basin_shapefile=get(config_dict, "basin_shapefile", "\${BASIN_SHAPEFILE_PATH}/basins_delineated/basins_by_region_simpl_R12.shp"),
+      area_file=get(config_dict, "area_file", "\${ENE_MODEL_DATA_PATH}/NEST/hydrology/landareamaskmap0.nc"),
       output_dir=get(config_dict, "output_dir", "./hydro_output"),
       data_period=get(config_dict, "data_period", "future"),
       region=get(config_dict, "region", "R12"),
@@ -260,7 +276,9 @@ function run_distributed_processing(;
   mkpath(base_config.output_dir)
 
   # Generate job combinations
-  jobs = generate_job_combinations()
+  daily = generate_job_combinations("daily")
+  monthly = generate_job_combinations("monthly")
+  jobs = append!(daily, monthly)
   print_job_summary(jobs)
 
   if dry_run
