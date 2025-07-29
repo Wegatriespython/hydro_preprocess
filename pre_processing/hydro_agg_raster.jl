@@ -174,7 +174,7 @@ function main()
     "--isimip-version"
     help = "ISIMIP version (2b or 3b)"
     default = "3b"
-    "--hydro-model",
+    "--hydro-model"
     help = "Hydro model name"
     default = "CWatM"
     "--climate-model", "-m"
@@ -191,7 +191,7 @@ function main()
     default = "ZMB"
     "--data-period"
     help = "Data period (historical or future)"
-    default = "future"
+    default = "historical"
     "--temporal-resolution"
     help = "Temporal resolution (monthly or daily)"
     default = "monthly"
