@@ -5,7 +5,7 @@ Minimal Julia raster aggregation test
 using DataFrames, CSV
 
 # Import shared basin aggregation functions
-include("../src/basin_aggregation.jl")
+include("../src/basin_aggregation_concept.jl")
 
 function test_julia_aggregation(output_file::String="julia_test_output.csv")
   # Test parameters
@@ -14,10 +14,10 @@ function test_julia_aggregation(output_file::String="julia_test_output.csv")
 
   # Use shared processing pipeline
   output_df = process_basin_aggregation(netcdf_file, basin_file;
-                                       variable="qtot",
-                                       n_basins=10,
-                                       n_timesteps=12,
-                                       agg_method="sum")
+    variable="qtot",
+    n_basins=10,
+    n_timesteps=12,
+    agg_method="sum")
 
   # Save
   CSV.write(output_file, output_df)
