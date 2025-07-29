@@ -67,8 +67,14 @@ function find_netcdf_files(config::ProcessingConfig; test_file::String="")
 
   println("Searching for NetCDF files...")
 
-  # Construct ISIMIP path: base_dir/hydro_model/scenario/climate_model
-  isimip_dir = joinpath(config.input_dir, "CWatM", config.scenario, uppercase(config.climate_model))
+  # Construct ISIMIP path based on data period
+  # Historical: base_dir/hydro_model/historical/climate_model
+  # Future: base_dir/hydro_model/scenario/climate_model
+  if config.data_period == "historical"
+    isimip_dir = joinpath(config.input_dir, config.hydro_model, "historical", uppercase(config.climate_model))
+  else
+    isimip_dir = joinpath(config.input_dir, config.hydro_model, config.scenario, uppercase(config.climate_model))
+  end
 
   files = filter(f -> endswith(f, ".nc"), readdir(isimip_dir, join=true))
   matching_files = filter(f -> occursin(config.variable, f) && occursin(config.temporal_resolution, f), files)
