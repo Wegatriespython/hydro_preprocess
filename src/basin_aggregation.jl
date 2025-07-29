@@ -1,132 +1,98 @@
-"""
-Core basin aggregation functions for hydrological data processing.
-Shared by both production and test code to avoid duplication.
-"""
+using NetCDF, Rasters, GeoDataFrames, Dates, DataFrames, ProgressMeter, Statistics
 
-using NetCDF, DataFrames, CSV, Dates, Statistics
-using ArchGDAL, GeoDataFrames, Rasters
+include("definitions.jl")
+include("utils.jl")
+
 
 """
-Load and clean hydrological data from NetCDF file.
-Returns cleaned data slice with extreme values replaced by NaN.
+Process a single NetCDF file using chunked processing for memory efficiency.
+Performs spatial aggregation to basins and applies unit conversion.
 """
-function load_data(netcdf_file::String, variable::String="qtot", 
-                  start_indices::Vector{Int}=[1, 1, 1], 
-                  count_indices::Union{Vector{Int}, Nothing}=nothing)
-    
+function process_netcdf_file(filepath::String, config::ProcessingConfig,
+  basins_gdf::DataFrame, area_grid::Union{Array,Nothing}, time_chunk_size::Int=100)
+
+  println("Processing NetCDF file: $(basename(filepath))")
+
+  # Open NetCDF file
+  ncfile = NetCDF.open(filepath)
+  try
     # Read coordinate variables
-    lons = NetCDF.ncread(netcdf_file, "lon")
-    lats = NetCDF.ncread(netcdf_file, "lat")
-    
-    # Determine count if not provided
-    if count_indices === nothing
-        count_indices = [length(lons), length(lats), 12]  # Default to 12 timesteps
-    end
-    
-    # Read data slice
-    data_slice = NetCDF.ncread(netcdf_file, variable, 
-                              start=start_indices, 
-                              count=count_indices)
-    
-    # Clean extreme values (NetCDF missing data flags like 1e20)
-    data_slice[abs.(data_slice) .>= 1e15] .= NaN
-    
-    return data_slice, lons, lats
-end
+    lons = NetCDF.ncread(filepath, "lon")
+    lats = NetCDF.ncread(filepath, "lat")
+    times = NetCDF.ncread(filepath, "time")
 
-"""
-Load basin polygons from shapefile.
-Returns GeoDataFrame with basin geometries and metadata.
-"""
-function load_basins(basin_file::String, n_basins::Union{Int, Nothing}=nothing)
-    basins_gdf = GeoDataFrames.read(basin_file)
-    
-    if n_basins !== nothing
-        basins_gdf = basins_gdf[1:n_basins, :]
-    end
-    
-    return basins_gdf
-end
+    # Get data dimensions
+    n_lon, n_lat, n_time = length(lons), length(lats), length(times)
 
-"""
-Perform zonal aggregation of raster data over basin polygons.
-Returns aggregated values for each basin and timestep.
-"""
-function aggregate_basins(data_slice::Array, lons::Vector, lats::Vector, 
-                         basins_gdf::DataFrame, agg_method::String="sum")
-    
-    # Create coordinate ranges for Rasters.jl
+    println("Data dimensions: $(n_lon) × $(n_lat) × $(n_time)")
+    println("Processing in chunks of $(time_chunk_size) timesteps")
+
+    # Initialize output array: basins × timesteps
+    n_basins = nrow(basins_gdf)
+    basin_data = zeros(Float64, n_basins, n_time)
+
+    # Create proper coordinate ranges for Rasters.jl
     x_range = range(minimum(lons), maximum(lons), length=length(lons))
     y_range = range(maximum(lats), minimum(lats), length=length(lats))
-    
-    # Determine aggregation function
-    agg_func = agg_method == "sum" ? sum : mean
-    
-    # Get dimensions
-    n_timesteps = size(data_slice, 3)
-    n_basins = nrow(basins_gdf)
-    results = zeros(Float64, n_basins, n_timesteps)
-    
-    # Aggregate each timestep
-    for t in 1:n_timesteps
-        spatial_slice = data_slice[:, :, t]
-        raster_obj = Raster(spatial_slice, (X(x_range), Y(y_range)))
-        basin_values = Rasters.zonal(agg_func, raster_obj; of=basins_gdf)
-        results[:, t] = basin_values
-    end
-    
-    return results
-end
 
-"""
-Format aggregated data as DataFrame with proper column names.
-"""
-function format_output(results::Matrix, basins_gdf::DataFrame, 
-                      timestep_names::Union{Vector{String}, Nothing}=nothing)
-    
-    n_basins, n_timesteps = size(results)
-    
-    # Create output DataFrame
-    output_df = DataFrame()
-    output_df.BASIN_ID = basins_gdf.BASIN_ID
-    output_df.BCU_name = basins_gdf.BCU_name
-    
-    # Add timestep columns
-    for i in 1:n_timesteps
-        if timestep_names !== nothing && i <= length(timestep_names)
-            col_name = timestep_names[i]
-        else
-            col_name = "timestep_$(i)"
+    # Define aggregation function based on method
+    # Note: NaN handling is done at the data level, not aggregation level
+    agg_func = config.spatial_method == "sum" ? sum : mean
+
+    # Get unit conversion factor once
+    conversion_factor, needs_area = get_unit_conversion_factor(config.variable)
+
+    # Process data in temporal chunks
+    @showprogress "Processing temporal chunks..." for chunk_start in 1:time_chunk_size:n_time
+      chunk_end = min(chunk_start + time_chunk_size - 1, n_time)
+      chunk_length = chunk_end - chunk_start + 1
+
+      # Read only the current temporal chunk
+      var_chunk = NetCDF.ncread(filepath, config.variable,
+        start=[1, 1, chunk_start],
+        count=[n_lon, n_lat, chunk_length])
+
+      # Process each timestep in current chunk
+      for t in 1:chunk_length
+        global_t = chunk_start + t - 1
+
+        # Extract spatial slice for this timestep
+        spatial_slice = @view var_chunk[:, :, t]
+
+        # Create working copy for unit conversion
+        working_slice = copy(spatial_slice)
+
+        # Apply unit conversion
+        if needs_area && area_grid !== nothing
+          working_slice .*= area_grid
         end
-        output_df[!, col_name] = results[:, i]
-    end
-    
-    return output_df
-end
+        working_slice .*= conversion_factor
 
-"""
-Complete processing pipeline: load data, aggregate, and format output.
-"""
-function process_basin_aggregation(netcdf_file::String, basin_file::String;
-                                  variable::String="qtot",
-                                  n_basins::Union{Int, Nothing}=nothing,
-                                  n_timesteps::Int=12,
-                                  agg_method::String="sum")
-    
-    # Load data
-    data_slice, lons, lats = load_data(netcdf_file, variable, [1, 1, 1], 
-                                      [length(NetCDF.ncread(netcdf_file, "lon")), 
-                                       length(NetCDF.ncread(netcdf_file, "lat")), 
-                                       n_timesteps])
-    
-    # Load basins
-    basins_gdf = load_basins(basin_file, n_basins)
-    
-    # Aggregate
-    results = aggregate_basins(data_slice, lons, lats, basins_gdf, agg_method)
-    
-    # Format output
-    output_df = format_output(results, basins_gdf)
-    
-    return output_df
+        # Create Raster object from working slice
+        raster_slice = Raster(working_slice, (X(x_range), Y(y_range)))
+
+        # Perform zonal aggregation for all basins at once
+        basin_values = Rasters.zonal(agg_func, raster_slice; of=basins_gdf)
+
+        # Post-process extreme values (likely from missing data flags like 1e20)
+        # Replace extreme values with NaN to indicate missing/invalid data
+        extreme_threshold = 1e15  # Much smaller than 1e20 but still very large
+        basin_values[abs.(basin_values).>=extreme_threshold] .= NaN
+
+        # Store results
+        basin_data[:, global_t] = basin_values
+      end
+
+      # Force garbage collection after each chunk
+      GC.gc()
+    end
+
+    # Create time index
+    time_index = create_time_index(times, filepath)
+
+    return basin_data, time_index
+
+  finally
+    NetCDF.close(ncfile)
+  end
 end
