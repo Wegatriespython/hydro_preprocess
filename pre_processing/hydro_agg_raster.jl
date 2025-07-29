@@ -174,6 +174,9 @@ function main()
     "--isimip-version"
     help = "ISIMIP version (2b or 3b)"
     default = "3b"
+    "--hydro-model",
+    help = "Hydro model name"
+    default = "CWatM"
     "--climate-model", "-m"
     help = "Climate model name"
     default = "gfdl-esm4"
@@ -220,6 +223,7 @@ function main()
     config = ProcessingConfig(;
       variable=get(config_dict, "variable", args["variable"]),
       isimip_version=get(config_dict, "isimip_version", args["isimip-version"]),
+      hydro_model=get(config_dict, "hydro_model", args["hydro-model"]),
       climate_model=get(config_dict, "climate_model", args["climate-model"]),
       scenario=get(config_dict, "scenario", args["scenario"]),
       region=get(config_dict, "region", args["region"]),
@@ -236,6 +240,7 @@ function main()
     config = ProcessingConfig(
       variable=args["variable"],
       isimip_version=args["isimip-version"],
+      hydro_model=args["hydro-model"],
       climate_model=args["climate-model"],
       scenario=args["scenario"],
       region=args["region"],

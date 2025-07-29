@@ -5,7 +5,8 @@ Base.@kwdef struct ProcessingConfig
 
   # Climate model configuration  
   isimip_version::String  # "2b" or "3b"
-  climate_model::String
+  hydro_model::String #eg CWaTM
+  climate_model::String #
   scenario::String  # ssp126, ssp370, ssp585
   data_period::String  # "historical" or "future"
 

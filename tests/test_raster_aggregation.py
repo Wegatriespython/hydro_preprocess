@@ -31,7 +31,9 @@ class TestRasterAggregation:
                 os.remove(f)
 
         # Run Julia test
-        project_path = os.path.dirname(test_dir)  # Use root directory instead of pre_processing
+        project_path = os.path.dirname(
+            test_dir
+        )  # Use root directory instead of pre_processing
         result = subprocess.run(
             ["julia", f"--project={project_path}", "test_julia_raster.jl"],
             capture_output=True,
@@ -183,4 +185,3 @@ class TestRasterAggregation:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

@@ -44,6 +44,7 @@ function run_processing_test(test_config)
     config = ProcessingConfig(
       variable=test_config.variable,
       isimip_version="3b",
+      hydro_model="CWatM",
       climate_model="gfdl-esm4",
       scenario="ssp126",
       region="R12",
