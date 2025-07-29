@@ -46,7 +46,7 @@ function save_basin_csv(aggregated_data::Matrix, time_index::Vector{Date},
   end
 
   # Generate output filename
-  output_filename = "$(config.variable)_$(config.temporal_resolution)_$(config.climate_model)_$(config.scenario)_$(config.data_period).csv"
+  output_filename = "$(config.variable)_$(config.temporal_resolution)_$(config.hydro_model)_$(config.climate_model)_$(config.scenario)_$(config.data_period).csv"
   output_path = joinpath(config.output_dir, output_filename)
 
   # Save CSV
