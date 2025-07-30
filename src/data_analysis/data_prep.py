@@ -57,20 +57,20 @@ def parse_filename(filename: str) -> Optional[Dict[str, str]]:
         "mri-esm2-0",
         "ukesm1-0-ll",
     ]
-    ssp_scenarios = ["ssp126", "ssp370", "ssp585"]
+    ssp_scenarios = ["historical"]
 
     climate_model_idx = None
     scenario_idx = None
 
     # Find climate model position
     for i, part in enumerate(parts):
-        if part in climate_models:
+        if part.lower() in climate_models:
             climate_model_idx = i
             break
 
     # Find scenario position
     for i, part in enumerate(parts):
-        if part in ssp_scenarios:
+        if part.lower() in ssp_scenarios:
             scenario_idx = i
             break
 
@@ -97,7 +97,7 @@ def parse_filename(filename: str) -> Optional[Dict[str, str]]:
 
 
 def discover_available_models(
-    data_dir: Union[str, Path], variable: str = "qtot", frequency: str = "monthly"
+    data_dir: Union[str, Path], variable: str, frequency: str
 ) -> Tuple[List[str], List[str]]:
     """
     Auto-discover available hydro and climate models from directory.
@@ -127,12 +127,12 @@ def discover_available_models(
 
 def load_var_data(
     data_dir: Union[str, Path],
-    variable: str = "qtot",
-    frequency: str = "monthly",
+    variable: str,
+    frequency: str,
+    ssp_scenarios: List[str],
+    time_period: str,
     hydro_models: Optional[List[str]] = None,
     climate_models: Optional[List[str]] = None,
-    ssp_scenarios: Optional[List[str]] = None,
-    time_period: str = "future",
 ) -> pd.DataFrame:
     """
     Load all variable CSV files and merge them into a single dataframe.
@@ -162,7 +162,7 @@ def load_var_data(
             climate_models = discovered_climate
 
     if ssp_scenarios is None:
-        ssp_scenarios = ["ssp126", "ssp370", "ssp585"]
+        ssp_scenarios = ["historical"]
 
     print(f"Loading {variable} {frequency} data files from {data_dir}...")
     print(f"  Hydro models: {hydro_models}")
@@ -213,191 +213,16 @@ def load_var_data(
     return combined_df
 
 
-def clean_outliers(
-    df: pd.DataFrame, value_column: str = "qtot", threshold: float = 1e15
-) -> pd.DataFrame:
-    """
-    Remove outliers and problematic data from dataset.
-
-    Args:
-        df: DataFrame with values to clean
-        value_column: Name of the column containing values to clean
-        threshold: Upper threshold for values (default 1e15)
-
-    Returns:
-        pd.DataFrame: Cleaned dataframe
-    """
-    print(
-        f"Comprehensive data cleaning for {value_column} (threshold {threshold:.0e})..."
-    )
-
-    initial_count = len(df)
-
-    print(
-        f"  Initial {value_column} range: {df[value_column].min():.2e} to {df[value_column].max():.2e}"
-    )
-
-    extreme_outliers = df[value_column] > threshold
-    print(f"  Found {extreme_outliers.sum()} extreme outliers (> {threshold:.0e})")
-
-    basin_outlier_rates = df.groupby("BASIN_ID").apply(
-        lambda x: (x[value_column] > threshold).sum() / len(x)
-    )
-    problematic_basins = basin_outlier_rates[basin_outlier_rates > 0.5].index
-
-    if len(problematic_basins) > 0:
-        print(f"  Found {len(problematic_basins)} basins with >50% outliers:")
-        for basin_id in problematic_basins:
-            basin_name = df[df["BASIN_ID"] == basin_id]["NAME"].iloc[0]
-            rate = basin_outlier_rates[basin_id]
-            print(
-                f"    Basin {basin_id} ({basin_name[:40]:40s}): {rate * 100:.1f}% outliers"
-            )
-
-        basin_mask = ~df["BASIN_ID"].isin(problematic_basins)
-        df_clean = df[basin_mask].copy()
-        removed_basins = initial_count - len(df_clean)
-        print(f"  Removed {removed_basins} rows from problematic basins")
-    else:
-        df_clean = df.copy()
-
-    extreme_mask = df_clean[value_column] <= threshold
-    df_clean = df_clean[extreme_mask]
-
-    negative_count = (df_clean[value_column] < 0).sum()
-    if negative_count > 0:
-        print(f"  Found {negative_count} negative {value_column} values, removing...")
-        df_clean = df_clean[df_clean[value_column] >= 0]
-
-    inf_nan_count = (~np.isfinite(df_clean[value_column])).sum()
-    if inf_nan_count > 0:
-        print(f"  Found {inf_nan_count} infinite/NaN values, removing...")
-        df_clean = df_clean[np.isfinite(df_clean[value_column])]
-
-    def clean_basin_outliers(basin_data):
-        """Apply IQR outlier removal within each basin."""
-        if len(basin_data) < 10:
-            return basin_data
-
-        Q1 = basin_data[value_column].quantile(0.25)
-        Q3 = basin_data[value_column].quantile(0.75)
-        IQR = Q3 - Q1
-
-        lower_bound = Q1 - 3 * IQR
-        upper_bound = Q3 + 3 * IQR
-
-        if lower_bound < 0:
-            lower_bound = 0
-        if upper_bound > threshold / 10:
-            upper_bound = threshold / 10
-
-        return basin_data[
-            (basin_data[value_column] >= lower_bound)
-            & (basin_data[value_column] <= upper_bound)
-        ]
-
-    initial_clean_count = len(df_clean)
-    df_clean = df_clean.groupby("BASIN_ID", group_keys=False).apply(
-        clean_basin_outliers
-    )
-    basin_outliers_removed = initial_clean_count - len(df_clean)
-
-    if basin_outliers_removed > 0:
-        print(
-            f"  Removed {basin_outliers_removed} basin-specific outliers using IQR method"
-        )
-
-    final_count = len(df_clean)
-    total_removed = initial_count - final_count
-    removed_pct = (total_removed / initial_count) * 100
-
-    print(f"  TOTAL REMOVED: {total_removed:,} rows ({removed_pct:.1f}%)")
-    print(f"  Final data: {final_count:,} rows")
-    print(
-        f"  Final {value_column} range: {df_clean[value_column].min():.2e} to {df_clean[value_column].max():.2e}"
-    )
-    print(
-        f"  Final basins: {df_clean['BASIN_ID'].nunique()} (removed {len(problematic_basins)} problematic basins)"
-    )
-
-    return df_clean
-
-
-def filter_basins_by_runoff(
-    df: pd.DataFrame, value_column: str = "qtot", drop_percentile: float = 0
-) -> pd.DataFrame:
-    """
-    Filter basins based on average value to focus on hydrologically significant basins.
-
-    Args:
-        df: Long format dataframe
-        value_column: Column name containing values to filter by
-        drop_percentile: Percentile threshold (0-100). Basins below this percentile
-                        of average value will be dropped. E.g., 50 drops bottom 50%.
-
-    Returns:
-        pd.DataFrame: Filtered dataframe
-    """
-    if drop_percentile <= 0:
-        print(f"No basin filtering (drop_percentile={drop_percentile})")
-        return df
-
-    print(
-        f"Filtering basins by average {value_column} (dropping bottom {drop_percentile}th percentile)..."
-    )
-
-    # Calculate mean values per basin (aggregate across all hydro/climate models and scenarios)
-    basin_means = df.groupby(["BASIN_ID", "NAME"])[value_column].mean().reset_index()
-    basin_means = basin_means.rename(columns={value_column: f"mean_{value_column}"})
-
-    threshold = np.percentile(basin_means[f"mean_{value_column}"], drop_percentile)
-
-    basins_to_keep = basin_means[basin_means[f"mean_{value_column}"] >= threshold][
-        "BASIN_ID"
-    ].values
-    basins_to_drop = basin_means[basin_means[f"mean_{value_column}"] < threshold]
-
-    print(f"  Threshold (P{drop_percentile}): {threshold:.2e}")
-    print(f"  Keeping {len(basins_to_keep)} basins (≥{threshold:.2e})")
-    print(f"  Dropping {len(basins_to_drop)} basins (<{threshold:.2e})")
-
-    if len(basins_to_drop) > 0:
-        print("  Examples of dropped low-runoff basins:")
-        for _, basin in basins_to_drop.head(5).iterrows():
-            print(
-                f"    Basin {basin['BASIN_ID']:3.0f}: {basin['NAME'][:40]:40s} (mean {value_column}: {basin[f'mean_{value_column}']:.2e})"
-            )
-        if len(basins_to_drop) > 5:
-            print(f"    ... and {len(basins_to_drop) - 5} more")
-
-    filtered_df = df[df["BASIN_ID"].isin(basins_to_keep)].copy()
-
-    high_runoff_basins = basin_means[
-        basin_means["BASIN_ID"].isin(basins_to_keep)
-    ].nlargest(5, f"mean_{value_column}")
-    print("  Examples of kept high-runoff basins:")
-    for _, basin in high_runoff_basins.iterrows():
-        print(
-            f"    Basin {basin['BASIN_ID']:3.0f}: {basin['NAME'][:40]:40s} (mean {value_column}: {basin[f'mean_{value_column}']:.2e})"
-        )
-
-    print(
-        f"  Final dataset: {len(filtered_df):,} rows from {len(basins_to_keep)} basins"
-    )
-
-    return filtered_df
-
-
 def compute_rolling_averages(
     df: pd.DataFrame,
-    value_column: str = "qtot",
-    frequency: Optional[str] = None,
-    windows: Optional[Dict[str, int]] = None,
+    value_column: str,
+    frequency: str,
+    windows: Dict[str, int],
 ) -> pd.DataFrame:
     """
     Compute rolling averages for temporal analysis.
-    
-    Uses backward-looking windows to ensure all data points from 2015 onwards 
+
+    Uses backward-looking windows to ensure all data points from 2015 onwards
     have rolling averages, avoiding data loss and sharp kinks.
 
     Args:
@@ -425,16 +250,18 @@ def compute_rolling_averages(
         else:
             windows = {"5yr": 60, "10yr": 120, "30yr": 360}
 
-    print(f"  Computing backward-looking rolling averages for {value_column} ({frequency} frequency)...")
+    print(
+        f"  Computing backward-looking rolling averages for {value_column} ({frequency} frequency)..."
+    )
     print(f"    Window sizes: {windows}")
 
     def add_rolling_avg_for_group(group_data):
         """Add rolling averages for a specific basin-hydro_model-climate_model-scenario combination."""
         group_data = group_data.sort_values("date").copy()
-        
+
         for window_name, window_size in windows.items():
             col_name = f"{value_column}_{window_name}"
-            
+
             # Use backward-looking rolling window (center=False)
             # This ensures data availability from the start of the time series
             rolling_values = (
@@ -442,7 +269,7 @@ def compute_rolling_averages(
                 .rolling(window=window_size, min_periods=window_size, center=False)
                 .mean()
             )
-            
+
             group_data[col_name] = rolling_values
 
         return group_data
@@ -474,7 +301,9 @@ def compute_rolling_averages(
             min_year = valid_data["year"].min()
             max_year = valid_data["year"].max()
             total_points = len(valid_data)
-            print(f"    {col_name}: {min_year}-{max_year} ({total_points:,} valid data points)")
+            print(
+                f"    {col_name}: {min_year}-{max_year} ({total_points:,} valid data points)"
+            )
         else:
             print(f"    {col_name}: No valid data points")
 
@@ -527,7 +356,7 @@ def detect_frequency_from_data(df: pd.DataFrame) -> str:
 
 def reshape_to_long_format(
     df: pd.DataFrame,
-    value_name: str = "qtot",
+    value_name: str,
     id_columns: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
@@ -629,18 +458,16 @@ def reshape_to_long_format(
 
 
 def prepare_data(
-    data_dir: Union[str, Path],
-    long_gen: bool = False,
-    long_path: Optional[str | Path] = None,
-    output_file: Optional[Union[str, Path]] = None,
-    variable: str = "qtot",
-    frequency: str = "monthly",  # Changed default to daily
+    data_dir: str | Path,
+    long_gen: bool,
+    long_path: str | Path,
+    output_file: str | Path,
+    variable: str,
+    frequency: str,  # Changed default to daily
+    ssp_scenarios: List[str],
+    time_period: str,
     hydro_models: Optional[List[str]] = None,
     climate_models: Optional[List[str]] = None,
-    ssp_scenarios: Optional[List[str]] = None,
-    time_period: str = "future",
-    drop_percentile: float = 0,
-    outlier_threshold: float = 1e15,
     rolling_windows: Optional[Dict[str, int]] = None,
 ) -> pd.DataFrame:
     """
@@ -662,32 +489,20 @@ def prepare_data(
     Returns:
         pd.DataFrame: Prepared long-format dataframe
     """
-    if long_gen and long_path is None:
+    if long_gen:
         combined_data = load_var_data(
             data_dir,
             variable,
             frequency,
-            hydro_models,
-            climate_models,
             ssp_scenarios,
             time_period,
+            hydro_models,
+            climate_models,
         )
 
         long_data = reshape_to_long_format(combined_data, value_name=variable)
     else:
         long_data = pd.read_csv(long_path)
-    # long_data = clean_outliers(
-    #     long_data, value_column=variable, threshold=outlier_threshold
-    # )
-    #
-    # long_data = filter_basins_by_runoff(
-    #     long_data, value_column=variable, drop_percentile=drop_percentile
-    # )
-    #
-    long_data = compute_rolling_averages(
-        long_data, value_column=variable, frequency=frequency, windows=rolling_windows
-    )
-
     if output_file:
         output_file = Path(output_file)
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -700,8 +515,8 @@ def prepare_data(
 def aggregate_daily_to_monthly(
     input_csv: Union[str, Path],
     output_csv: Union[str, Path],
-    value_column: str = "qtot",
-    chunk_size: int = 50000,
+    value_column: str,
+    chunk_size: int,
     aggregation_stats: Optional[List[str]] = None,
 ) -> None:
     """
@@ -906,14 +721,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--long_gen",
         type=bool,
-        default=False,
+        default=True,
         help="Generate long data from hydro_data",
     )
-    parser.add_argument(
-        "--long_path",
-        type=str,
-        default="/home/raghunathan/hydro_preprocess/anova_results/qtot_monthly_aggregated_data.csv",
-    )
+    parser.add_argument("--long_path", type=str, default="")
     parser.add_argument(
         "--output",
         type=str,
@@ -924,23 +735,17 @@ if __name__ == "__main__":
         "--variable", type=str, default="qtot", help="Variable name to process"
     )
     parser.add_argument(
+        "--ssp_scenarios", default=["historical"], help="scenarios to process"
+    )
+    parser.add_argument(
+        "--time_period", type=str, default="historical", help="Time period to process"
+    )
+    parser.add_argument(
         "--frequency",
         type=str,
-        default="monthly",  # Changed default to daily
+        default="daily",  # Changed default to daily
         choices=["daily", "monthly"],
         help="Data frequency (daily or monthly)",
-    )
-    parser.add_argument(
-        "--drop-percentile",
-        type=float,
-        default=10,
-        help="Percentile threshold for dropping low-value basins (0-100)",
-    )
-    parser.add_argument(
-        "--outlier-threshold",
-        type=float,
-        default=1e15,
-        help="Upper threshold for outlier removal",
     )
     parser.add_argument(
         "--aggregate-only",
@@ -984,7 +789,7 @@ if __name__ == "__main__":
             long_path=args.long_path,
             output_file=args.output,
             variable=args.variable,
+            ssp_scenarios=args.ssp_scenarios,
+            time_period=args.time_period,
             frequency=args.frequency,
-            drop_percentile=args.drop_percentile,
-            outlier_threshold=args.outlier_threshold,
         )
