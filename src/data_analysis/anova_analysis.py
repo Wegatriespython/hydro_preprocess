@@ -21,158 +21,170 @@ from statsmodels.stats.anova import anova_lm
 from statsmodels.formula.api import ols
 import warnings
 import sys
+import logging
 
-# Import data preparation module
-from data_prep import prepare_data
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("ignore")
 
 # Configuration
-DATA_DIR = Path("/home/raghunathan/hydro_preprocess/pre_processing/unicc_output_deux")
+DATA_DIR = Path("/home/raghunathan/hydro_preprocess/anova_results/")
 OUTPUT_DIR = Path("/home/raghunathan/hydro_preprocess/anova_results")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Model and scenario definitions
-CLIMATE_MODELS = [
-    "gfdl-esm4",
-    "ipsl-cm6a-lr",
-    "mpi-esm1-2-hr",
-    "mri-esm2-0",
-    "ukesm1-0-ll",
-]
-SSP_SCENARIOS = ["ssp126", "ssp370", "ssp585"]
+# All model and scenario definitions will be auto-discovered from data
+CLIMATE_MODELS = None
+SSP_SCENARIOS = None
+HYDRO_MODELS = None
+
+# Global flag to check if categories have been discovered
+_categories_discovered = False
 
 
-def perform_anova_comparison(df):
+def auto_discover_categories(df):
     """
-    Compare different temporal representations in ANOVA models.
-    Tests: year, 5-year, 10-year, and 30-year rolling averages.
+    Auto-discover unique values for categorical variables from the data.
 
     Args:
-        df (pd.DataFrame): Long format dataframe with rolling averages
+        df (pd.DataFrame): Input dataframe
 
     Returns:
-        dict: Results for different temporal representations
+        tuple: (hydro_models, climate_models, ssp_scenarios)
     """
-    print("Performing ANOVA comparison with different temporal representations...")
+    hydro_models = sorted(df["hydro_model"].unique())
+    climate_models = sorted(df["climate_model"].unique())
+    ssp_scenarios = sorted(df["ssp_scenario"].unique())
 
-    # Define different temporal models to test (all include hydro_model)
-    temporal_models = {
-        "year": {
-            "formula": """qtot ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + year + 
-                          C(ssp_scenario):C(climate_model) + C(ssp_scenario):C(hydro_model) + 
-                          C(climate_model):C(hydro_model) + C(ssp_scenario):year + 
-                          C(climate_model):year + C(hydro_model):year""",
-            "description": "Annual temporal trend with hydro model",
-        },
-        "5yr_rolling": {
-            "formula": """qtot_5yr ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + year + 
-                          C(ssp_scenario):C(climate_model) + C(ssp_scenario):C(hydro_model) + 
-                          C(climate_model):C(hydro_model) + C(ssp_scenario):year + 
-                          C(climate_model):year + C(hydro_model):year""",
-            "description": "5-year rolling average with hydro model",
-        },
-        "10yr_rolling": {
-            "formula": """qtot_10yr ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + year + 
-                          C(ssp_scenario):C(climate_model) + C(ssp_scenario):C(hydro_model) + 
-                          C(climate_model):C(hydro_model) + C(ssp_scenario):year + 
-                          C(climate_model):year + C(hydro_model):year""",
-            "description": "10-year rolling average with hydro model",
-        },
-        "30yr_rolling": {
-            "formula": """qtot_30yr ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + year + 
-                          C(ssp_scenario):C(climate_model) + C(ssp_scenario):C(hydro_model) + 
-                          C(climate_model):C(hydro_model) + C(ssp_scenario):year + 
-                          C(climate_model):year + C(hydro_model):year""",
-            "description": "30-year rolling average with hydro model",
-        },
-        "decade": {
-            "formula": """qtot ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + C(decade) + 
-                          C(ssp_scenario):C(climate_model) + C(ssp_scenario):C(hydro_model) + 
-                          C(climate_model):C(hydro_model) + C(ssp_scenario):C(decade) + 
-                          C(climate_model):C(decade) + C(hydro_model):C(decade)""",
-            "description": "Decade-based temporal grouping with hydro model",
-        },
-    }
+    logger.info(f"Auto-discovered categories:")
+    logger.info(f"  Hydro models: {hydro_models}")
+    logger.info(f"  Climate models: {climate_models}")
+    logger.info(f"  SSP scenarios: {ssp_scenarios}")
 
-    all_results = {}
+    return hydro_models, climate_models, ssp_scenarios
+
+
+def perform_temporal_anova(df, target_variable="qtot", model_name="base"):
+    """
+    Perform ANOVA analysis for a specific target variable.
+
+    Args:
+        df (pd.DataFrame): Long format dataframe
+        target_variable (str): Target variable for ANOVA (qtot, qtot_mean_5yr, qtot_mean_30yr)
+        model_name (str): Name for this model configuration
+
+    Returns:
+        pd.DataFrame: Results for all basins
+    """
+    logger.info(f"Performing ANOVA for {target_variable} ({model_name})...")
+
+    # Standard formula template - same structure for all temporal representations
+    formula = f"""{target_variable} ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + year + 
+                  C(ssp_scenario):C(climate_model) + C(ssp_scenario):C(hydro_model) + 
+                  C(climate_model):C(hydro_model) + C(ssp_scenario):year + 
+                  C(climate_model):year + C(hydro_model):year"""
+
+    results = []
     basin_ids = df["BASIN_ID"].unique()
 
-    for model_name, model_config in temporal_models.items():
-        print(f"\n  Testing {model_name}: {model_config['description']}")
-        results = []
+    # Check if target variable exists and has data
+    if target_variable not in df.columns:
+        logger.error(f"Target variable '{target_variable}' not found in dataframe")
+        return pd.DataFrame()
 
-        for i, basin_id in enumerate(basin_ids):
-            if i % 50 == 0:
-                print(f"    Processing basin {i + 1}/{len(basin_ids)}: {basin_id}")
+    # For rolling averages, filter out NaN values
+    if target_variable != "qtot":
+        df = df.dropna(subset=[target_variable])
+        if len(df) == 0:
+            logger.warning(f"No non-NaN data for {target_variable}")
+            return pd.DataFrame()
 
-            # Filter data for this basin
-            basin_data = df[df["BASIN_ID"] == basin_id].copy()
+    for i, basin_id in enumerate(basin_ids):
+        if i % 50 == 0:
+            logger.info(f"  Processing basin {i + 1}/{len(basin_ids)}: {basin_id}")
 
-            # For rolling averages, remove rows with NaN values
-            if model_name.endswith("_rolling"):
-                target_var = model_config["formula"].split("~")[0].strip()
-                basin_data = basin_data.dropna(subset=[target_var])
+        # Filter data for this basin
+        basin_data = df[df["BASIN_ID"] == basin_id].copy()
 
-            # Skip if insufficient data
-            min_obs = 150  # Need reasonable sample size
-            if len(basin_data) < min_obs:
-                continue
+        # Skip if insufficient data
+        min_obs = 150  # Need reasonable sample size
+        if len(basin_data) < min_obs:
+            logger.debug(
+                f"Skipping basin {basin_id}: insufficient data ({len(basin_data)} < {min_obs})"
+            )
+            continue
 
-            try:
-                # Fit the model
-                model = ols(model_config["formula"], data=basin_data).fit()
-                anova_table = anova_lm(model, typ=2)
+        # Check for sufficient variation in factors
+        n_ssp = basin_data["ssp_scenario"].nunique()
+        n_climate = basin_data["climate_model"].nunique()
+        n_hydro = basin_data["hydro_model"].nunique()
 
-                # Extract variance components
-                total_ss = anova_table["sum_sq"].sum()
+        if n_ssp < 2 or n_climate < 2 or n_hydro < 2:
+            logger.debug(
+                f"Skipping basin {basin_id}: insufficient factor levels (SSP:{n_ssp}, Climate:{n_climate}, Hydro:{n_hydro})"
+            )
+            continue
 
-                # Initialize results dictionary
-                result = {
-                    "basin_id": basin_id,
-                    "basin_name": basin_data["NAME"].iloc[0],
-                    "region": basin_data["REGION"].iloc[0],
-                    "n_observations": len(basin_data),
-                    "r_squared": model.rsquared,
-                    "temporal_model": model_name,
-                }
+        try:
+            # Fit the model
+            model = ols(formula, data=basin_data).fit()
+            anova_table = anova_lm(model, typ=2)
 
-                # Extract variance percentages for available terms
-                for term in anova_table.index:
-                    if term != "Residual":
-                        var_name = f"{term.lower().replace('c(', '').replace(')', '').replace(':', '_x_')}_pct"
-                        var_name = var_name.replace(" ", "_")
-                        result[var_name] = (
-                            anova_table.loc[term, "sum_sq"] / total_ss
-                        ) * 100
+            # Extract variance components
+            total_ss = anova_table["sum_sq"].sum()
 
-                        # P-values
-                        pval_name = var_name.replace("_pct", "_pvalue")
-                        result[pval_name] = anova_table.loc[term, "PR(>F)"]
+            # Initialize results dictionary
+            result = {
+                "basin_id": basin_id,
+                "basin_name": basin_data["NAME"].iloc[0],
+                "region": basin_data["REGION"].iloc[0],
+                "area_km2": basin_data["area_km2"].iloc[0]
+                if "area_km2" in basin_data.columns
+                else None,
+                "n_observations": len(basin_data),
+                "r_squared": model.rsquared,
+                "temporal_model": model_name,
+                "mean_value": basin_data[target_variable].mean(),
+                "std_value": basin_data[target_variable].std(),
+            }
 
-                # Residual variance
-                result["residual_pct"] = (
-                    anova_table.loc["Residual", "sum_sq"] / total_ss
-                ) * 100
+            # Extract variance percentages for all terms
+            for term in anova_table.index:
+                if term != "Residual":
+                    var_name = f"{term.lower().replace('c(', '').replace(')', '').replace(':', '_x_')}_pct"
+                    var_name = var_name.replace(" ", "_")
+                    result[var_name] = (
+                        anova_table.loc[term, "sum_sq"] / total_ss
+                    ) * 100
 
-                results.append(result)
+                    # P-values
+                    pval_name = var_name.replace("_pct", "_pvalue")
+                    result[pval_name] = anova_table.loc[term, "PR(>F)"]
 
-            except Exception as e:
-                continue
+            # Residual variance
+            result["residual_pct"] = (
+                anova_table.loc["Residual", "sum_sq"] / total_ss
+            ) * 100
 
-        all_results[model_name] = pd.DataFrame(results)
-        if len(results) > 0:
-            print(f"    Successfully analyzed {len(results)} basins with {model_name}")
-        else:
-            print(f"    No successful analyses with {model_name}")
+            results.append(result)
 
-    return all_results
+        except Exception as e:
+            logger.warning(f"Error processing basin {basin_id}: {str(e)}")
+            continue
+
+    results_df = pd.DataFrame(results)
+    logger.info(f"Successfully analyzed {len(results_df)} basins for {model_name}")
+
+    return results_df
 
 
 def perform_anova_by_basin(df):
     """
-    Perform ANOVA analysis for each basin separately.
-    This is the main analysis function using annual year.
+    Perform ANOVA analysis for each basin separately using qtot.
+    This is a wrapper around perform_temporal_anova for backward compatibility.
 
     Args:
         df (pd.DataFrame): Long format dataframe
@@ -180,151 +192,7 @@ def perform_anova_by_basin(df):
     Returns:
         pd.DataFrame: Variance decomposition results by basin
     """
-    print("Performing ANOVA analysis by basin...")
-
-    results = []
-    basin_ids = df["BASIN_ID"].unique()
-
-    for i, basin_id in enumerate(basin_ids):
-        if i % 50 == 0:
-            print(f"  Processing basin {i + 1}/{len(basin_ids)}: {basin_id}")
-
-        # Filter data for this basin
-        basin_data = df[df["BASIN_ID"] == basin_id].copy()
-
-        # Skip if insufficient data for reliable ANOVA
-        # Need minimum observations for each model-scenario combination
-        min_obs_per_group = 10
-        min_total_obs = len(CLIMATE_MODELS) * len(SSP_SCENARIOS) * min_obs_per_group
-
-        if len(basin_data) < min_total_obs:
-            print(
-                f"    Skipping basin {basin_id}: insufficient data ({len(basin_data)} < {min_total_obs})"
-            )
-            continue
-
-        # Check if we have data for all model-scenario combinations
-        combo_counts = basin_data.groupby(["climate_model", "ssp_scenario"]).size()
-        if len(combo_counts) < len(CLIMATE_MODELS) * len(SSP_SCENARIOS):
-            print(f"    Skipping basin {basin_id}: missing model-scenario combinations")
-            continue
-
-        # Check if any combination has too few observations
-        if combo_counts.min() < min_obs_per_group:
-            print(
-                f"    Skipping basin {basin_id}: some combinations have <{min_obs_per_group} observations"
-            )
-            continue
-
-        try:
-            # Fit comprehensive ANOVA model with temporal controls and hydro model
-            # Include month, year, and hydro model as controls, plus interactions
-            model = ols(
-                """qtot ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + year + 
-                          C(ssp_scenario):C(climate_model) + C(ssp_scenario):C(hydro_model) + 
-                          C(climate_model):C(hydro_model) + C(ssp_scenario):year + 
-                          C(climate_model):year + C(hydro_model):year""",
-                data=basin_data,
-            ).fit()
-
-            # Get ANOVA table
-            anova_table = anova_lm(model, typ=2)
-
-            # Calculate total sum of squares
-            total_ss = anova_table["sum_sq"].sum()
-
-            # Calculate variance percentages for all terms (flexible approach)
-            def safe_extract(term_name):
-                """Safely extract variance and p-value for a term, return 0/NaN if not present."""
-                if term_name in anova_table.index:
-                    variance_pct = (
-                        anova_table.loc[term_name, "sum_sq"] / total_ss
-                    ) * 100
-                    pvalue = anova_table.loc[term_name, "PR(>F)"]
-                    return variance_pct, pvalue
-                else:
-                    return 0.0, np.nan
-
-            # Main effects
-            ssp_variance, ssp_pvalue = safe_extract("C(ssp_scenario)")
-            model_variance, model_pvalue = safe_extract("C(climate_model)")
-            hydro_variance, hydro_pvalue = safe_extract("C(hydro_model)")
-            month_variance, month_pvalue = safe_extract("C(month)")
-            year_variance, year_pvalue = safe_extract("year")
-
-            # Two-way interactions
-            ssp_model_interaction, ssp_model_pvalue = safe_extract(
-                "C(ssp_scenario):C(climate_model)"
-            )
-            ssp_hydro_interaction, ssp_hydro_pvalue = safe_extract(
-                "C(ssp_scenario):C(hydro_model)"
-            )
-            model_hydro_interaction, model_hydro_pvalue = safe_extract(
-                "C(climate_model):C(hydro_model)"
-            )
-            ssp_year_interaction, ssp_year_pvalue = safe_extract("C(ssp_scenario):year")
-            model_year_interaction, model_year_pvalue = safe_extract(
-                "C(climate_model):year"
-            )
-            hydro_year_interaction, hydro_year_pvalue = safe_extract(
-                "C(hydro_model):year"
-            )
-
-            residual_variance = (anova_table.loc["Residual", "sum_sq"] / total_ss) * 100
-
-            # Get basin metadata
-            basin_info = basin_data.iloc[0]
-
-            results.append(
-                {
-                    "basin_id": basin_id,
-                    "basin_name": basin_info["NAME"],
-                    "region": basin_info["REGION"],
-                    "area_km2": basin_info["area_km2"],
-                    "n_observations": len(basin_data),
-                    # Main effects
-                    "ssp_variance_pct": ssp_variance,
-                    "model_variance_pct": model_variance,
-                    "hydro_variance_pct": hydro_variance,
-                    "month_variance_pct": month_variance,
-                    "year_variance_pct": year_variance,
-                    # Two-way interactions
-                    "ssp_model_interaction_pct": ssp_model_interaction,
-                    "ssp_hydro_interaction_pct": ssp_hydro_interaction,
-                    "model_hydro_interaction_pct": model_hydro_interaction,
-                    "ssp_year_interaction_pct": ssp_year_interaction,
-                    "model_year_interaction_pct": model_year_interaction,
-                    "hydro_year_interaction_pct": hydro_year_interaction,
-                    # Residual
-                    "residual_variance_pct": residual_variance,
-                    # P-values - Main effects
-                    "ssp_pvalue": ssp_pvalue,
-                    "model_pvalue": model_pvalue,
-                    "hydro_pvalue": hydro_pvalue,
-                    "month_pvalue": month_pvalue,
-                    "year_pvalue": year_pvalue,
-                    # P-values - Interactions
-                    "ssp_model_pvalue": ssp_model_pvalue,
-                    "ssp_hydro_pvalue": ssp_hydro_pvalue,
-                    "model_hydro_pvalue": model_hydro_pvalue,
-                    "ssp_year_pvalue": ssp_year_pvalue,
-                    "model_year_pvalue": model_year_pvalue,
-                    "hydro_year_pvalue": hydro_year_pvalue,
-                    # Model fit
-                    "r_squared": model.rsquared,
-                    "mean_qtot": basin_data["qtot"].mean(),
-                    "std_qtot": basin_data["qtot"].std(),
-                }
-            )
-
-        except Exception as e:
-            print(f"    Error processing basin {basin_id}: {e}")
-            continue
-
-    results_df = pd.DataFrame(results)
-    print(f"Successfully analyzed {len(results_df)} basins")
-
-    return results_df
+    return perform_temporal_anova(df, target_variable="qtot", model_name="annual")
 
 
 def create_summary_statistics(results_df):
@@ -337,67 +205,69 @@ def create_summary_statistics(results_df):
     Returns:
         pd.DataFrame: Summary statistics
     """
-    print("Creating summary statistics...")
+    logger.info("Creating summary statistics...")
 
-    # Overall statistics for all variance components
+    if len(results_df) == 0:
+        logger.warning("No results to summarize")
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Find all variance columns dynamically
     variance_columns = [
-        "ssp_variance_pct",
-        "model_variance_pct",
-        "month_variance_pct",
-        "year_variance_pct",
-        "ssp_model_interaction_pct",
-        "ssp_year_interaction_pct",
-        "model_year_interaction_pct",
-        "residual_variance_pct",
+        col
+        for col in results_df.columns
+        if col.endswith("_pct") and not col.startswith("residual")
     ]
+    variance_columns.append("residual_pct")  # Add residual if exists
+    variance_columns = [col for col in variance_columns if col in results_df.columns]
 
+    # Find all p-value columns dynamically
+    pvalue_columns = [col for col in results_df.columns if col.endswith("_pvalue")]
+
+    # Create summary statistics
     summary_stats = {"metric": ["Mean", "Median", "Std Dev", "Min", "Max"]}
 
     for col in variance_columns:
-        summary_stats[col] = [
-            results_df[col].mean(),
-            results_df[col].median(),
-            results_df[col].std(),
-            results_df[col].min(),
-            results_df[col].max(),
-        ]
+        if col in results_df.columns:
+            summary_stats[col] = [
+                results_df[col].mean(),
+                results_df[col].median(),
+                results_df[col].std(),
+                results_df[col].min(),
+                results_df[col].max(),
+            ]
 
     summary_df = pd.DataFrame(summary_stats)
 
     # Significance counts for all factors
     alpha = 0.05
-    sig_counts = {
-        "factor": [
-            "SSP Scenario",
-            "Climate Model",
-            "Month",
-            "Year",
-            "SSP×Model",
-            "SSP×Year",
-            "Model×Year",
-        ],
-        "significant_basins": [
-            (results_df["ssp_pvalue"] < alpha).sum(),
-            (results_df["model_pvalue"] < alpha).sum(),
-            (results_df["month_pvalue"] < alpha).sum(),
-            (results_df["year_pvalue"] < alpha).sum(),
-            (results_df["ssp_model_pvalue"] < alpha).sum(),
-            (results_df["ssp_year_pvalue"] < alpha).sum(),
-            (results_df["model_year_pvalue"] < alpha).sum(),
-        ],
-        "total_basins": [len(results_df)] * 7,
-        "percentage_significant": [
-            ((results_df["ssp_pvalue"] < alpha).sum() / len(results_df)) * 100,
-            ((results_df["model_pvalue"] < alpha).sum() / len(results_df)) * 100,
-            ((results_df["month_pvalue"] < alpha).sum() / len(results_df)) * 100,
-            ((results_df["year_pvalue"] < alpha).sum() / len(results_df)) * 100,
-            ((results_df["ssp_model_pvalue"] < alpha).sum() / len(results_df)) * 100,
-            ((results_df["ssp_year_pvalue"] < alpha).sum() / len(results_df)) * 100,
-            ((results_df["model_year_pvalue"] < alpha).sum() / len(results_df)) * 100,
-        ],
-    }
+    sig_data = []
 
-    significance_df = pd.DataFrame(sig_counts)
+    for pval_col in pvalue_columns:
+        if pval_col in results_df.columns:
+            # Extract factor name from p-value column
+            factor_name = (
+                pval_col.replace("_pvalue", "")
+                .replace("_x_", "×")
+                .replace("_", " ")
+                .title()
+            )
+            factor_name = factor_name.replace("Ssp", "SSP").replace(
+                "Climate Model", "Model"
+            )
+
+            sig_count = (results_df[pval_col] < alpha).sum()
+            sig_pct = (sig_count / len(results_df)) * 100 if len(results_df) > 0 else 0
+
+            sig_data.append(
+                {
+                    "factor": factor_name,
+                    "significant_basins": sig_count,
+                    "total_basins": len(results_df),
+                    "percentage_significant": sig_pct,
+                }
+            )
+
+    significance_df = pd.DataFrame(sig_data)
 
     return summary_df, significance_df
 
@@ -418,15 +288,15 @@ def print_anova_results_summary(results_df, model_name="", title=None):
             else "ANOVA RESULTS SUMMARY"
         )
 
-    print(f"\n{title}")
-    print("=" * len(title))
+    logger.info(f"\n{title}")
+    logger.info("=" * len(title))
 
     if len(results_df) == 0:
-        print("No results to summarize.")
+        logger.info("No results to summarize.")
         return
 
-    print(f"\nAnalyzed {len(results_df)} basins")
-    print(f"Average R² = {results_df['r_squared'].mean():.3f}")
+    logger.info(f"\nAnalyzed {len(results_df)} basins")
+    logger.info(f"Average R² = {results_df['r_squared'].mean():.3f}")
 
     # Identify available variance columns dynamically
     variance_cols = [
@@ -436,7 +306,7 @@ def print_anova_results_summary(results_df, model_name="", title=None):
     ]
     pvalue_cols = [col for col in results_df.columns if col.endswith("_pvalue")]
 
-    print("\nVariance Contributions (% across all basins):")
+    logger.info("\nVariance Contributions (% across all basins):")
 
     # Group columns by category for better organization
     main_effects = []
@@ -449,7 +319,7 @@ def print_anova_results_summary(results_df, model_name="", title=None):
             main_effects.append(col)
 
     if main_effects:
-        print("MAIN EFFECTS:")
+        logger.info("MAIN EFFECTS:")
         for col in sorted(main_effects):
             # Create readable label from column name
             label = col.replace("_pct", "").replace("_", " ").title()
@@ -466,10 +336,10 @@ def print_anova_results_summary(results_df, model_name="", title=None):
 
             mean_val = results_df[col].mean()
             std_val = results_df[col].std()
-            print(f"  {label:17s}: {mean_val:6.1f}% ± {std_val:.1f}%")
+            logger.info(f"  {label:17s}: {mean_val:6.1f}% ± {std_val:.1f}%")
 
     if interactions:
-        print("\nINTERACTIONS:")
+        logger.info("\nINTERACTIONS:")
         for col in sorted(interactions):
             # Create readable label from column name
             label = (
@@ -479,7 +349,7 @@ def print_anova_results_summary(results_df, model_name="", title=None):
 
             mean_val = results_df[col].mean()
             std_val = results_df[col].std()
-            print(f"  {label:17s}: {mean_val:6.1f}% ± {std_val:.1f}%")
+            logger.info(f"  {label:17s}: {mean_val:6.1f}% ± {std_val:.1f}%")
 
     # Residual variance
     residual_cols = [
@@ -491,11 +361,11 @@ def print_anova_results_summary(results_df, model_name="", title=None):
         residual_col = residual_cols[0]
         mean_val = results_df[residual_col].mean()
         std_val = results_df[residual_col].std()
-        print(f"\nRESIDUAL:         {mean_val:6.1f}% ± {std_val:.1f}%")
+        logger.info(f"\nRESIDUAL:         {mean_val:6.1f}% ± {std_val:.1f}%")
 
     # Significance summary
     if pvalue_cols:
-        print(f"\nSignificant effects (p < 0.05):")
+        logger.info("\nSignificant effects (p < 0.05):")
         for pval_col in sorted(pvalue_cols):
             # Create readable label from p-value column name
             label = (
@@ -520,129 +390,148 @@ def print_anova_results_summary(results_df, model_name="", title=None):
 
             sig_count = (results_df[pval_col] < 0.05).sum()
             sig_pct = (sig_count / len(results_df)) * 100
-            print(f"{label:17s}: {sig_pct:5.1f}% of basins")
+            logger.info(f"{label:17s}: {sig_pct:5.1f}% of basins")
 
 
-def main(drop_percentile=0, force_regen=False):
+def main(input_file=None, target_variable=None, save_results=False):
     """
     Main analysis function.
 
     Args:
-        drop_percentile (float): Percentile threshold for dropping low-runoff basins (0-100).
-                               E.g., 50 drops bottom 50% of basins by average qtot.
-        force_regen (bool): Force regeneration of the prepared data file
+        input_file (str): Path to the prepared data CSV file
+        target_variable (str): Specific variable to analyze (qtot, qtot_mean_5yr, qtot_mean_30yr)
+                              If None, analyzes all available variables
     """
-
-    print("=" * 60)
-    print("HYDRO MODEL ANOVA ANALYSIS WITH TEMPORAL COMPARISON")
-    if drop_percentile > 0:
-        print(
-            f"Basin filtering: Dropping bottom {drop_percentile}th percentile by runoff"
-        )
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("HYDRO MODEL ANOVA ANALYSIS WITH TEMPORAL COMPARISON")
+    logger.info("=" * 60)
 
     try:
-        # Check if prepared data file exists
-        prepared_data_file = OUTPUT_DIR / "combined_long_data_rl.csv"
+        # Load prepared data file
+        if input_file is None:
+            input_file = OUTPUT_DIR / "qtot_monthly_rolling_averages.csv"
 
-        if prepared_data_file.exists() and not force_regen:
-            print(f"Loading existing prepared data from {prepared_data_file}")
-            print("(Use --regen flag to force regeneration)")
-            long_data = pd.read_csv(prepared_data_file)
+        input_path = Path(input_file)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
 
-            # Convert date column back to datetime
+        logger.info(f"Loading data from {input_path}...")
+        long_data = pd.read_csv(input_path)
+
+        # Convert date column to datetime
+        if "date" in long_data.columns:
             long_data["date"] = pd.to_datetime(long_data["date"])
 
-            print(f"Loaded {len(long_data)} rows from prepared data file")
-        else:
-            if force_regen:
-                print("Regenerating data (--regen flag specified)...")
+        logger.info(f"Loaded {len(long_data)} rows from {input_path.name}")
+
+        # Auto-discover categories from the data
+        global HYDRO_MODELS, CLIMATE_MODELS, SSP_SCENARIOS
+        HYDRO_MODELS, CLIMATE_MODELS, SSP_SCENARIOS = auto_discover_categories(
+            long_data
+        )
+
+        # Perform ANOVA for different temporal representations
+        temporal_results = {}
+
+        # Define available analyses
+        available_analyses = {
+            "qtot": ("annual", lambda df: perform_anova_by_basin(df)),
+            "qtot_mean_5yr": (
+                "5yr_rolling",
+                lambda df: perform_temporal_anova(
+                    df.dropna(subset=["qtot_mean_5yr"]), "qtot_mean_5yr", "5yr_rolling"
+                ),
+            ),
+            "qtot_mean_30yr": (
+                "30yr_rolling",
+                lambda df: perform_temporal_anova(
+                    df.dropna(subset=["qtot_mean_30yr"]),
+                    "qtot_mean_30yr",
+                    "30yr_rolling",
+                ),
+            ),
+        }
+
+        # Run analysis based on target_variable parameter
+        if target_variable:
+            # Run only the specified variable
+            if (
+                target_variable in available_analyses
+                and target_variable in long_data.columns
+            ):
+                model_name, analysis_func = available_analyses[target_variable]
+                logger.info(f"Running analysis for {target_variable} only...")
+                results = analysis_func(long_data)
+                if len(results) > 0:
+                    temporal_results[model_name] = results
+                else:
+                    logger.warning(f"No results generated for {target_variable}")
             else:
-                print("Prepared data file not found. Generating...")
-
-            # Use the data_prep module to prepare data
-            long_data = prepare_data(
-                data_dir=DATA_DIR,
-                output_file=prepared_data_file,
-                variable="qtot",
-                frequency="daily",  # Changed to daily as default
-                hydro_models=None,  # Will auto-detect from available files
-                climate_models=CLIMATE_MODELS,
-                ssp_scenarios=SSP_SCENARIOS,
-                time_period="future",
-                drop_percentile=drop_percentile,
-                outlier_threshold=1e15,
-            )
-
-        # Step 3: Perform temporal comparison analysis
-        temporal_results = perform_anova_comparison(long_data)
-
-        # Step 4: Perform standard ANOVA by basin (year-based)
-        results_df = perform_anova_by_basin(long_data)
-
-        # Step 5: Create summary statistics for year-based analysis
-        summary_df, significance_df = create_summary_statistics(results_df)
-
-        # Save results
-        print("Saving results...")
-        results_df.to_csv(OUTPUT_DIR / "basin_anova_results.csv", index=False)
-        summary_df.to_csv(OUTPUT_DIR / "summary_statistics.csv", index=False)
-        significance_df.to_csv(OUTPUT_DIR / "significance_summary.csv", index=False)
-
-        # Save temporal comparison results
-        for model_name, model_results in temporal_results.items():
-            if len(model_results) > 0:
-                model_results.to_csv(
-                    OUTPUT_DIR / f"temporal_comparison_{model_name}.csv", index=False
-                )
-
-        # Data is already saved by prepare_data function when output_file is specified
-
-        # Print main ANOVA results summary using reusable function
-        print_anova_results_summary(results_df, title="MAIN ANOVA RESULTS (YEAR-BASED)")
-
-        # Print detailed summaries for each temporal model
-        for model_name, model_results in temporal_results.items():
-            if len(model_results) > 0:
-                print_anova_results_summary(model_results, model_name=model_name)
-
-        # Quick comparison of SSP×time interactions across models
-        print(f"\n{'=' * 60}")
-        print("TEMPORAL MODEL COMPARISON - SSP×TIME INTERACTIONS")
-        print("=" * 60)
-
-        ssp_year_comparison = {}
-        for model_name, model_results in temporal_results.items():
-            if len(model_results) > 0:
-                # Find SSP×year interaction columns
-                ssp_year_cols = [
-                    col
-                    for col in model_results.columns
-                    if "ssp" in col.lower()
-                    and ("year" in col.lower() or "decade" in col.lower())
-                    and "_pct" in col
-                ]
-                if ssp_year_cols:
-                    col = ssp_year_cols[0]
-                    mean_var = model_results[col].mean()
-                    ssp_year_comparison[model_name] = mean_var
-                    r2_mean = model_results["r_squared"].mean()
-                    print(
-                        f"{model_name:15s}: SSP×time = {mean_var:5.2f}%, R² = {r2_mean:.3f}"
+                if target_variable not in available_analyses:
+                    logger.error(
+                        f"Unknown target variable: {target_variable}. Available: {list(available_analyses.keys())}"
+                    )
+                else:
+                    logger.error(
+                        f"Target variable '{target_variable}' not found in data columns"
+                    )
+                return
+        else:
+            # Run all available analyses (original behavior)
+            for var_name, (model_name, analysis_func) in available_analyses.items():
+                if var_name in long_data.columns:
+                    logger.info(f"Running analysis for {var_name}...")
+                    results = analysis_func(long_data)
+                    if len(results) > 0:
+                        temporal_results[model_name] = results
+        # Create summary statistics
+        for model_name, results_df in temporal_results.items():
+            if len(results_df) > 0:
+                summary_df, significance_df = create_summary_statistics(results_df)
+                if save_results:
+                    # Save results
+                    results_df.to_csv(
+                        OUTPUT_DIR / f"basin_anova_results_{model_name}.csv",
+                        index=False,
+                    )
+                    summary_df.to_csv(
+                        OUTPUT_DIR / f"summary_statistics_{model_name}.csv", index=False
+                    )
+                    significance_df.to_csv(
+                        OUTPUT_DIR / f"significance_summary_{model_name}.csv",
+                        index=False,
                     )
 
-        if ssp_year_comparison:
-            best_model = max(
-                ssp_year_comparison.keys(), key=lambda x: ssp_year_comparison[x]
-            )
-            print(
-                f"\n** Best at capturing climate change: {best_model} ({ssp_year_comparison[best_model]:.2f}% SSP×time) **"
-            )
+            # Print summary
+            print_anova_results_summary(results_df, model_name=model_name)
 
-        print("Results saved to anova_results/ directory")
+        # Compare temporal models
+        if len(temporal_results) > 1:
+            logger.info("\n" + "=" * 60)
+            logger.info("TEMPORAL MODEL COMPARISON - SSP×TIME INTERACTIONS")
+            logger.info("=" * 60)
+
+            for model_name, results_df in temporal_results.items():
+                if len(results_df) > 0:
+                    # Find SSP×year interaction column
+                    ssp_year_cols = [
+                        col
+                        for col in results_df.columns
+                        if "ssp" in col.lower()
+                        and "year" in col.lower()
+                        and "_pct" in col
+                    ]
+                    if ssp_year_cols:
+                        mean_var = results_df[ssp_year_cols[0]].mean()
+                        r2_mean = results_df["r_squared"].mean()
+                        logger.info(
+                            f"{model_name:15s}: SSP×time = {mean_var:5.2f}%, R² = {r2_mean:.3f}"
+                        )
+
+        logger.info(f"\nResults saved to {OUTPUT_DIR}/")
 
     except Exception as e:
-        print(f"Error in analysis: {e}")
+        logger.error(f"Error in analysis: {e}", exc_info=True)
         raise
 
 
@@ -653,23 +542,35 @@ if __name__ == "__main__":
         description="ANOVA Analysis for Hydro Model Output"
     )
     parser.add_argument(
-        "drop_percentile",
-        nargs="?",
-        type=float,
-        default=10,
-        help="Percentile threshold for dropping low-runoff basins (0-100). Default: 10",
+        "--input",
+        type=str,
+        default=None,
+        help="Path to the prepared data CSV file (default: anova_results/qtot_monthly_rolling_averages.csv)",
     )
     parser.add_argument(
-        "--regen",
+        "--save_results",
         action="store_true",
-        help="Force regeneration of the prepared data file",
+        default=False,
+        help="Store results from anova",
+    )
+    parser.add_argument(
+        "--target-variable",
+        type=str,
+        default=None,
+        choices=["qtot", "qtot_mean_5yr", "qtot_mean_30yr"],
+        help="Specific variable to analyze. If not specified, analyzes all available variables.",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level (default: INFO)",
     )
 
     args = parser.parse_args()
 
-    if not 0 <= args.drop_percentile <= 100:
-        print("Error: drop_percentile must be between 0 and 100")
-        sys.exit(1)
+    # Update logging level based on argument
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
 
-    print(f"Using threshold {args.drop_percentile}")
-    main(drop_percentile=args.drop_percentile, force_regen=args.regen)
+    main(input_file=args.input, target_variable=args.target_variable)
