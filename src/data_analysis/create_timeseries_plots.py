@@ -20,22 +20,23 @@ import argparse
 warnings.filterwarnings("ignore")
 
 # Configuration
-DATA_DIR = Path("/home/raghunathan/hydro_preprocess/anova_results")
-PLOTS_DIR = Path("timeseries_plots")
+DATA_DIR = Path("/home/raghunathan/hydro_preprocess/anova_results/")
+PLOTS_DIR = Path("/home/raghunathan/hydro_preprocess/anova_plots/timeseries_plots")
 PLOTS_DIR.mkdir(exist_ok=True)
 
 # Representative basins from file
 REPRESENTATIVE_BASINS = [
     "Amazon",
-    "Atlantic Ocean Seaboard",
-    "Danube",
+    "Congo",
+    "Yangtze",
     "Ganges Bramaputra",
     "Indus",
+    "Danube",
     "Mekong",
     "Mississippi",
     "Nile",
-    "Ob",
     "Persian Gulf Coast",
+    "Australia Interior",
 ]
 
 # Model and scenario definitions
@@ -55,12 +56,19 @@ SSP_COLORS = {
     "ssp585": "#d62728",  # Red - high emissions
 }
 
-MODEL_COLORS = {
+CLIMATE_MODEL_COLORS = {
     "gfdl-esm4": "#1f77b4",
     "ipsl-cm6a-lr": "#ff7f0e",
     "mpi-esm1-2-hr": "#2ca02c",
     "mri-esm2-0": "#d62728",
     "ukesm1-0-ll": "#9467bd",
+}
+HYDRO_MODEL_COLORS = {
+    "CWatM": "#1f77b4",
+    "H08": "#ff7f0e",
+    "MIROC-INTEG-LAND": "#2ca02c",
+    "WaterGAP2-2e": "#d62728",
+    "JULES-W2": "#9467bd",
 }
 
 
@@ -68,12 +76,18 @@ def load_timeseries_data(var):
     """Load the combined long-format data with all basins."""
     print("Loading timeseries data...")
 
-    data_file = DATA_DIR / f"qtot_p_cleaned.csv"
+    data_file = DATA_DIR / f"qtot_monthly_rolling_averages.csv"
     if not data_file.exists():
         raise FileNotFoundError(f"Data file not found: {data_file}")
 
     df = pd.read_csv(data_file)
     df["date"] = pd.to_datetime(df["date"])
+
+    # TEMPORARY: Exclude CWatM to test L-shaped jump hypothesis
+    print("TEMPORARY: Excluding CWatM model to test transition")
+    original_len = len(df)
+    df = df[df["hydro_model"] != "CWatM"].copy()
+    print(f"Excluded CWatM: {original_len:,} -> {len(df):,} data points")
 
     print(f"Loaded {len(df):,} data points")
     print(f"Date range: {df['date'].min()} to {df['date'].max()}")
@@ -82,7 +96,7 @@ def load_timeseries_data(var):
     return df
 
 
-def find_representative_basins(df, var="qtot_30yr"):
+def find_representative_basins(df, var="qtot_mean_30yr"):
     """Find basin IDs for representative basin names."""
     print("Finding representative basins...")
 
@@ -109,7 +123,7 @@ def find_representative_basins(df, var="qtot_30yr"):
     return basin_matches
 
 
-def create_annual_timeseries(df, basin_matches, var="qtot_30yr"):
+def create_annual_timeseries(df, basin_matches, var="qtot_mean_30yr"):
     """Create annual timeseries for easier visualization."""
     print("Creating annual timeseries...")
 
@@ -144,21 +158,159 @@ def create_annual_timeseries(df, basin_matches, var="qtot_30yr"):
     return annual_data
 
 
-def plot_ssp_grouped_timeseries(
-    annual_data, basin_matches, save_plots=True, var="qtot_30yr"
+def create_monthly_timeseries(df, basin_matches, var="qtot_mean"):
+    """Create monthly timeseries preserving month information."""
+    print("Creating monthly timeseries...")
+
+    # Filter for representative basins only
+    basin_ids = [info["id"] for info in basin_matches.values()]
+    df_filtered = df[df["BASIN_ID"].isin(basin_ids)].copy()
+
+    # Ensure we have year and month columns
+    if "year" not in df_filtered.columns:
+        df_filtered["year"] = df_filtered["date"].dt.year
+    if "month" not in df_filtered.columns:
+        df_filtered["month"] = df_filtered["date"].dt.month
+
+    # Add month name for better labeling
+    month_names = {
+        1: "Jan",
+        2: "Feb",
+        3: "Mar",
+        4: "Apr",
+        5: "May",
+        6: "Jun",
+        7: "Jul",
+        8: "Aug",
+        9: "Sep",
+        10: "Oct",
+        11: "Nov",
+        12: "Dec",
+    }
+    df_filtered["month_name"] = df_filtered["month"].map(month_names)
+
+    print(
+        f"Created monthly data: {len(df_filtered)} basin-model-scenario-month combinations"
+    )
+
+    return df_filtered
+
+
+def create_regional_timeseries(df, var="qtot_mean_30yr", temporal_resolution="annual"):
+    """
+    Create regional aggregated timeseries at specified temporal resolution.
+
+    Parameters:
+    - df: Input dataframe with basin-level data
+    - var: Variable to aggregate
+    - temporal_resolution: Either "annual" or "monthly"
+    """
+    print(f"Creating regional {temporal_resolution} timeseries...")
+
+    # Add year column if not present
+    if "year" not in df.columns:
+        df["year"] = df["date"].dt.year
+
+    # Base grouping columns
+    grouping_cols = ["REGION", "climate_model", "ssp_scenario"]
+    if "hydro_model" in df.columns:
+        grouping_cols.append("hydro_model")
+
+    # Add temporal columns based on resolution
+    if temporal_resolution == "annual":
+        grouping_cols.append("year")
+    elif temporal_resolution == "monthly":
+        if "month" not in df.columns:
+            df["month"] = df["date"].dt.month
+        grouping_cols.extend(["year", "month"])
+        # Preserve date column for monthly data
+        date_col = ["date"]
+    else:
+        raise ValueError(f"Invalid temporal_resolution: {temporal_resolution}")
+
+    # Aggregate by region (sum across basins within each region)
+    agg_dict = {f"{var}": "sum"}
+    if temporal_resolution == "monthly" and "date" in df.columns:
+        agg_dict["date"] = "first"  # Keep the date for monthly data
+
+    regional_data = df.groupby(grouping_cols).agg(agg_dict).reset_index()
+
+    # Create fake BASIN_ID and NAME columns to work with existing plotting functions
+    regional_data["BASIN_ID"] = regional_data["REGION"]
+    regional_data["NAME"] = regional_data["REGION"]
+
+    # Add month name for monthly data
+    if temporal_resolution == "monthly":
+        month_names = {
+            1: "Jan",
+            2: "Feb",
+            3: "Mar",
+            4: "Apr",
+            5: "May",
+            6: "Jun",
+            7: "Jul",
+            8: "Aug",
+            9: "Sep",
+            10: "Oct",
+            11: "Nov",
+            12: "Dec",
+        }
+        regional_data["month_name"] = regional_data["month"].map(month_names)
+
+    print(
+        f"Created regional data: {len(regional_data)} region-model-scenario-{temporal_resolution} combinations"
+    )
+    print(f"Available regions: {regional_data['REGION'].unique()}")
+
+    # Create region matches dictionary to work with existing plotting functions
+    region_matches = {}
+    for region in regional_data["REGION"].unique():
+        region_matches[region] = {"id": region, "name": region}
+
+    return regional_data, region_matches
+
+
+def timeseries_plot(
+    annual_data,
+    basin_matches,
+    group_by,
+    color_map,
+    var="qtot_mean_30yr",
+    is_regional=False,
+    plot_type="spread",
+    title_suffix="",
+    save_name=None,
 ):
     """
-    Create timeseries plots grouped by SSP scenario.
-    Each SSP gets a shaded region representing model spread.
+    Generic function to create timeseries plots with different grouping strategies.
+
+    Parameters:
+    - group_by: Column name to group by (e.g., 'ssp_scenario', 'climate_model', 'hydro_model')
+    - color_map: Dictionary mapping group values to colors
+    - plot_type: 'spread' for min/max envelope, 'lines' for individual lines
+    - title_suffix: Additional text for the main title
     """
-    print("Creating SSP-grouped timeseries plots...")
+    print(f"Creating {group_by}-grouped timeseries plots...")
+
+    # Filter data to start from 2030 & 2090
+    annual_data = annual_data[
+        (annual_data["year"] >= 2030) & (annual_data["year"] <= 2090)
+    ].copy()
+    print(
+        f"Filtered data to start from 2030 and 2090. Data points remaining: {len(annual_data)}"
+    )
 
     n_basins = len(basin_matches)
-    fig, axes = plt.subplots(2, 5, figsize=(25, 12))
+    if is_regional:
+        fig, axes = plt.subplots(2, 6, figsize=(36, 12))
+        max_plots = 12
+    else:
+        fig, axes = plt.subplots(2, 5, figsize=(25, 12))
+        max_plots = 10
     axes = axes.flatten()
 
     for i, (target_basin, basin_info) in enumerate(basin_matches.items()):
-        if i >= 10:  # Only plot first 10
+        if i >= max_plots:
             break
 
         ax = axes[i]
@@ -175,39 +327,73 @@ def plot_ssp_grouped_timeseries(
             ax.set_title(f"{target_basin}\n(No Data)")
             continue
 
-        # Plot each SSP scenario with model spread
-        for ssp in SSP_SCENARIOS:
-            ssp_data = basin_data[basin_data["ssp_scenario"] == ssp]
+        # Get unique groups
+        groups = basin_data[group_by].unique()
 
-            if len(ssp_data) == 0:
-                continue
+        if plot_type == "spread":
+            # For spread plots, we need a secondary grouping
+            if group_by == "ssp_scenario":
+                secondary_group = "climate_model"
+            elif group_by == "climate_model":
+                secondary_group = "ssp_scenario"
+            else:
+                secondary_group = None
 
-            # Calculate model spread (min/max envelope)
-            yearly_stats = (
-                ssp_data.groupby("year")[f"{var}"]
-                .agg(["min", "max", "mean", "std"])
-                .reset_index()
-            )
+            for group in groups:
+                group_data = basin_data[basin_data[group_by] == group]
 
-            if len(yearly_stats) > 0:
-                # Plot mean line
-                ax.plot(
-                    yearly_stats["year"],
-                    yearly_stats["mean"],
-                    color=SSP_COLORS[ssp],
-                    linewidth=2,
-                    alpha=0.8,
-                    label=f"{ssp.upper()}",
+                if len(group_data) == 0:
+                    continue
+
+                # Calculate spread
+                yearly_stats = (
+                    group_data.groupby("year")[f"{var}"]
+                    .agg(["min", "max", "mean", "std"])
+                    .reset_index()
                 )
 
-                # Add shaded region for model spread
-                ax.fill_between(
-                    yearly_stats["year"],
-                    yearly_stats["min"],
-                    yearly_stats["max"],
-                    color=SSP_COLORS[ssp],
-                    alpha=0.2,
-                )
+                if len(yearly_stats) > 0:
+                    # Plot mean line
+                    ax.plot(
+                        yearly_stats["year"],
+                        yearly_stats["mean"],
+                        color=color_map.get(group, "#000000"),
+                        linewidth=2,
+                        alpha=0.8,
+                        label=f"{group.upper()}"
+                        if hasattr(group, "upper")
+                        else str(group),
+                    )
+
+                    # Add shaded region for spread
+                    ax.fill_between(
+                        yearly_stats["year"],
+                        yearly_stats["min"],
+                        yearly_stats["max"],
+                        color=color_map.get(group, "#000000"),
+                        alpha=0.2,
+                    )
+
+        elif plot_type == "lines":
+            # For line plots (e.g., hydro models)
+            for group in groups:
+                group_data = basin_data[basin_data[group_by] == group]
+
+                if len(group_data) == 0:
+                    continue
+
+                # Average across any other dimensions
+                yearly_means = group_data.groupby("year")[f"{var}"].mean().reset_index()
+
+                if len(yearly_means) > 0:
+                    ax.plot(
+                        yearly_means["year"],
+                        yearly_means[f"{var}"],
+                        color=color_map.get(group, "#000000"),
+                        linewidth=2,
+                        alpha=0.8,
+                        label=group,
+                    )
 
         ax.set_title(f"{target_basin}\n{basin_name[:30]}", fontsize=10)
         ax.set_xlabel("Year")
@@ -219,155 +405,122 @@ def plot_ssp_grouped_timeseries(
             ax.legend(frameon=True, fancybox=True, shadow=True)
 
     # Remove empty subplots
-    for j in range(len(basin_matches), 10):
-        axes[j].remove()
+    for j in range(len(basin_matches), max_plots):
+        if j < len(axes):
+            axes[j].remove()
 
-    plt.suptitle(
-        "Timeseries by SSP Scenario\n(Shaded regions show climate model spread)",
-        fontsize=16,
-    )
+    plt.suptitle(title_suffix, fontsize=16)
     plt.tight_layout()
 
-    if save_plots:
-        plt.savefig(
-            PLOTS_DIR / "ssp_grouped_timeseries.png", dpi=300, bbox_inches="tight"
-        )
-        plt.savefig(PLOTS_DIR / "ssp_grouped_timeseries.pdf", bbox_inches="tight")
+    if save_name:
+        plt.savefig(PLOTS_DIR / f"{save_name}.png", dpi=300, bbox_inches="tight")
+        plt.savefig(PLOTS_DIR / f"{save_name}.pdf", bbox_inches="tight")
 
     plt.show()
 
 
+def plot_ssp_grouped_timeseries(
+    annual_data, basin_matches, save_plots=True, var="qtot_mean_30yr", is_regional=False
+):
+    """
+    Create timeseries plots grouped by SSP scenario.
+    Each SSP gets a shaded region representing model spread.
+    """
+    timeseries_plot(
+        annual_data,
+        basin_matches,
+        group_by="ssp_scenario",
+        color_map=SSP_COLORS,
+        var=var,
+        is_regional=is_regional,
+        plot_type="spread",
+        title_suffix="Timeseries by SSP Scenario\n(Shaded regions show climate model spread)",
+        save_name="ssp_grouped_timeseries" if save_plots else None,
+    )
+
+
 def plot_model_grouped_timeseries(
-    annual_data, basin_matches, save_plots=True, var="qtot_30yr"
+    annual_data, basin_matches, save_plots=True, var="qtot_mean_30yr", is_regional=False
 ):
     """
     Create timeseries plots grouped by climate model.
     Each model gets a shaded region representing SSP spread.
     """
-    print("Creating model-grouped timeseries plots...")
-
-    n_basins = len(basin_matches)
-    fig, axes = plt.subplots(2, 5, figsize=(25, 12))
-    axes = axes.flatten()
-
-    for i, (target_basin, basin_info) in enumerate(basin_matches.items()):
-        if i >= 10:  # Only plot first 10
-            break
-
-        ax = axes[i]
-        basin_id = basin_info["id"]
-        basin_name = basin_info["name"]
-
-        # Filter data for this basin
-        basin_data = annual_data[annual_data["BASIN_ID"] == basin_id]
-
-        if len(basin_data) == 0:
-            ax.text(
-                0.5, 0.5, "No Data", ha="center", va="center", transform=ax.transAxes
-            )
-            ax.set_title(f"{target_basin}\n(No Data)")
-            continue
-
-        # Plot each climate model with SSP spread
-        for model in CLIMATE_MODELS:
-            model_data = basin_data[basin_data["climate_model"] == model]
-
-            if len(model_data) == 0:
-                continue
-
-            # Calculate SSP spread (min/max envelope)
-            yearly_stats = (
-                model_data.groupby("year")[f"{var}"]
-                .agg(["min", "max", "mean", "std"])
-                .reset_index()
-            )
-
-            if len(yearly_stats) > 0:
-                # Plot mean line
-                ax.plot(
-                    yearly_stats["year"],
-                    yearly_stats["mean"],
-                    color=MODEL_COLORS[model],
-                    linewidth=2,
-                    alpha=0.8,
-                    label=f"{model.upper()}",
-                )
-
-                # Add shaded region for SSP spread
-                ax.fill_between(
-                    yearly_stats["year"],
-                    yearly_stats["min"],
-                    yearly_stats["max"],
-                    color=MODEL_COLORS[model],
-                    alpha=0.2,
-                )
-
-        ax.set_title(f"{target_basin}\n{basin_name[:30]}", fontsize=10)
-        ax.set_xlabel("Year")
-        ax.set_ylabel(f"{var}")
-        ax.grid(True, alpha=0.3)
-
-        # Add legend only for first subplot
-        if i == 0:
-            ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=8)
-
-    # Remove empty subplots
-    for j in range(len(basin_matches), 10):
-        axes[j].remove()
-
-    plt.suptitle(
-        "Timeseries by Climate Model\n(Shaded regions show SSP scenario spread)",
-        fontsize=16,
+    timeseries_plot(
+        annual_data,
+        basin_matches,
+        group_by="climate_model",
+        color_map=CLIMATE_MODELS,
+        var=var,
+        is_regional=is_regional,
+        plot_type="spread",
+        title_suffix="Timeseries by Climate Model\n(Shaded regions show SSP scenario spread)",
+        save_name="model_grouped_timeseries" if save_plots else None,
     )
-    plt.tight_layout()
-
-    if save_plots:
-        plt.savefig(
-            PLOTS_DIR / "model_grouped_timeseries.png", dpi=300, bbox_inches="tight"
-        )
-        plt.savefig(PLOTS_DIR / "model_grouped_timeseries.pdf", bbox_inches="tight")
-
-    plt.show()
 
 
 def plot_hydro_grouped_timeseries(
-    annual_data, basin_matches, save_plots=True, var="qtot_30yr"
+    annual_data, basin_matches, save_plots=True, var="qtot_mean_30yr", is_regional=False
 ):
     """
     Create timeseries plots grouped by hydro model.
     Each hydro model gets a shaded region representing climate model and SSP spread.
     Only creates plots if hydro_model column is available.
     """
-    if "hydro_model" not in annual_data.columns:
-        print("No hydro_model column found, skipping hydro-grouped plots")
-        return
+    timeseries_plot(
+        annual_data,
+        basin_matches,
+        group_by="hydro_model",
+        color_map=HYDRO_MODEL_COLORS,
+        var=var,
+        is_regional=is_regional,
+        plot_type="spread",
+        title_suffix="Timeseries by Hydro Model\n(Shaded regions show climate model and SSP spread)",
+        save_name="hydro_grouped_timeseries" if save_plots else None,
+    )
 
-    print("Creating hydro-grouped timeseries plots...")
 
-    # Define colors for hydro models
-    hydro_models = annual_data["hydro_model"].unique()
-    hydro_colors = {
-        "CWatM": "#1f77b4",
-        "H08": "#ff7f0e",
-        "MIROC-INTEG-LAND": "#2ca02c",
-        "WaterGAP2-2e": "#d62728",
-        "JULES-W2": "#9467bd",
-    }
+def plot_monthly_climatology(
+    monthly_data,
+    basin_matches,
+    group_by="ssp_scenario",
+    color_map=None,
+    var="qtot_mean",
+    title_suffix="",
+    save_name=None,
+    is_regional=False,
+):
+    """
+    Create monthly climatology plots showing average seasonal patterns.
 
-    # Use default colors for any models not in our predefined set
-    import matplotlib.pyplot as plt
+    Parameters:
+    - monthly_data: DataFrame with monthly timeseries data
+    - basin_matches: Dictionary of basin information
+    - group_by: Column to group by (e.g., 'ssp_scenario', 'climate_model')
+    - color_map: Dictionary mapping group values to colors
+    """
+    print(f"Creating monthly climatology plots grouped by {group_by}...")
 
-    default_colors = plt.cm.Set1(np.linspace(0, 1, len(hydro_models)))
-    for i, model in enumerate(hydro_models):
-        if model not in hydro_colors:
-            hydro_colors[model] = default_colors[i]
+    # Set default color map if not provided
+    if color_map is None:
+        if group_by == "ssp_scenario":
+            color_map = SSP_COLORS
+        elif group_by == "climate_model":
+            color_map = CLIMATE_MODEL_COLORS
+        elif group_by == "hydro_model":
+            color_map = HYDRO_MODEL_COLORS
 
     n_basins = len(basin_matches)
-    fig, axes = plt.subplots(2, 5, figsize=(25, 12))
+    if is_regional:
+        fig, axes = plt.subplots(2, 6, figsize=(36, 12))
+        max_plots = 12
+    else:
+        fig, axes = plt.subplots(2, 5, figsize=(30, 12))
+        max_plots = 10
     axes = axes.flatten()
 
     for i, (target_basin, basin_info) in enumerate(basin_matches.items()):
-        if i >= 10:  # Only plot first 10
+        if i >= max_plots:
             break
 
         ax = axes[i]
@@ -375,7 +528,7 @@ def plot_hydro_grouped_timeseries(
         basin_name = basin_info["name"]
 
         # Filter data for this basin
-        basin_data = annual_data[annual_data["BASIN_ID"] == basin_id]
+        basin_data = monthly_data[monthly_data["BASIN_ID"] == basin_id]
 
         if len(basin_data) == 0:
             ax.text(
@@ -384,69 +537,294 @@ def plot_hydro_grouped_timeseries(
             ax.set_title(f"{target_basin}\n(No Data)")
             continue
 
-        # Plot each hydro model with climate model and SSP spread
-        for hydro_model in hydro_models:
-            hydro_data = basin_data[basin_data["hydro_model"] == hydro_model]
+        # Get unique groups
+        groups = basin_data[group_by].unique()
 
-            if len(hydro_data) == 0:
+        for group in groups:
+            group_data = basin_data[basin_data[group_by] == group]
+
+            if len(group_data) == 0:
                 continue
 
-            # Calculate spread across climate models and SSPs (min/max envelope)
-            yearly_stats = (
-                hydro_data.groupby("year")[f"{var}"]
-                .agg(["min", "max", "mean", "std"])
+            # Calculate monthly averages across all years
+            monthly_avg = (
+                group_data.groupby("month")
+                .agg({var: ["mean", "std", "min", "max"]})
                 .reset_index()
             )
 
-            if len(yearly_stats) > 0:
-                # Plot mean line
-                ax.plot(
-                    yearly_stats["year"],
-                    yearly_stats["mean"],
-                    color=hydro_colors[hydro_model],
-                    linewidth=2,
-                    alpha=0.8,
-                    label=f"{hydro_model}",
-                )
+            # Flatten column names
+            monthly_avg.columns = [
+                "month",
+                f"{var}_mean",
+                f"{var}_std",
+                f"{var}_min",
+                f"{var}_max",
+            ]
 
-                # Add shaded region for model/SSP spread
-                ax.fill_between(
-                    yearly_stats["year"],
-                    yearly_stats["min"],
-                    yearly_stats["max"],
-                    color=hydro_colors[hydro_model],
-                    alpha=0.2,
-                )
+            # Plot mean line
+            ax.plot(
+                monthly_avg["month"],
+                monthly_avg[f"{var}_mean"],
+                color=color_map.get(group, "#000000"),
+                linewidth=2,
+                alpha=0.8,
+                label=f"{group.upper()}" if hasattr(group, "upper") else str(group),
+                marker="o",
+                markersize=4,
+            )
+
+            # Add shaded region for standard deviation
+            ax.fill_between(
+                monthly_avg["month"],
+                monthly_avg[f"{var}_mean"] - monthly_avg[f"{var}_std"],
+                monthly_avg[f"{var}_mean"] + monthly_avg[f"{var}_std"],
+                color=color_map.get(group, "#000000"),
+                alpha=0.2,
+            )
 
         ax.set_title(f"{target_basin}\n{basin_name[:30]}", fontsize=10)
-        ax.set_xlabel("Year")
+        ax.set_xlabel("Month")
         ax.set_ylabel(f"{var}")
+        ax.set_xticks(range(1, 13))
+        ax.set_xticklabels(["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"])
         ax.grid(True, alpha=0.3)
 
         # Add legend only for first subplot
         if i == 0:
-            ax.legend(frameon=True, fancybox=True, shadow=True, fontsize=8)
+            ax.legend(frameon=True, fancybox=True, shadow=True)
 
     # Remove empty subplots
-    for j in range(len(basin_matches), 10):
-        axes[j].remove()
+    for j in range(len(basin_matches), max_plots):
+        if j < len(axes):
+            axes[j].remove()
 
-    plt.suptitle(
-        "Timeseries by Hydro Model\n(Shaded regions show climate model and SSP spread)",
-        fontsize=16,
-    )
+    plt.suptitle(f"Monthly Climatology {title_suffix}", fontsize=16)
     plt.tight_layout()
 
-    if save_plots:
-        plt.savefig(
-            PLOTS_DIR / "hydro_grouped_timeseries.png", dpi=300, bbox_inches="tight"
-        )
-        plt.savefig(PLOTS_DIR / "hydro_grouped_timeseries.pdf", bbox_inches="tight")
+    if save_name:
+        plt.savefig(PLOTS_DIR / f"{save_name}.png", dpi=300, bbox_inches="tight")
+        plt.savefig(PLOTS_DIR / f"{save_name}.pdf", bbox_inches="tight")
 
     plt.show()
 
 
-def create_summary_statistics_plots(annual_data, basin_matches, var="qtot_30yr"):
+def plot_seasonal_boxplots(
+    monthly_data,
+    basin_matches,
+    group_by="ssp_scenario",
+    var="qtot_mean",
+    title_suffix="",
+    save_name=None,
+    is_regional=False,
+):
+    """
+    Create seasonal boxplots showing distribution of values for each month.
+    """
+    print(f"Creating seasonal boxplots grouped by {group_by}...")
+
+    n_basins = len(basin_matches)
+    if is_regional:
+        fig, axes = plt.subplots(2, 6, figsize=(36, 12))
+        max_plots = 12
+    else:
+        fig, axes = plt.subplots(2, 5, figsize=(30, 12))
+        max_plots = 10
+    axes = axes.flatten()
+
+    for i, (target_basin, basin_info) in enumerate(basin_matches.items()):
+        if i >= max_plots:
+            break
+
+        ax = axes[i]
+        basin_id = basin_info["id"]
+        basin_name = basin_info["name"]
+
+        # Filter data for this basin
+        basin_data = monthly_data[monthly_data["BASIN_ID"] == basin_id]
+
+        if len(basin_data) == 0:
+            ax.text(
+                0.5, 0.5, "No Data", ha="center", va="center", transform=ax.transAxes
+            )
+            ax.set_title(f"{target_basin}\n(No Data)")
+            continue
+
+        # Create boxplot data structure
+        box_data = []
+        positions = []
+        colors = []
+        labels = []
+
+        groups = sorted(basin_data[group_by].unique())
+        n_groups = len(groups)
+
+        for month in range(1, 13):
+            month_data = basin_data[basin_data["month"] == month]
+            month_position = month - 0.5 + (0.8 / n_groups) * 0.5
+
+            for g_idx, group in enumerate(groups):
+                group_month_data = month_data[month_data[group_by] == group][var].values
+                if len(group_month_data) > 0:
+                    box_data.append(group_month_data)
+                    positions.append(month_position + g_idx * (0.8 / n_groups))
+
+                    if group_by == "ssp_scenario":
+                        colors.append(SSP_COLORS.get(group, "#000000"))
+                    elif group_by == "climate_model":
+                        colors.append(CLIMATE_MODEL_COLORS.get(group, "#000000"))
+                    elif group_by == "hydro_model":
+                        colors.append(HYDRO_MODEL_COLORS.get(group, "#000000"))
+
+                    if month == 1:  # Only add labels once
+                        labels.append(group)
+
+        # Create boxplots
+        bp = ax.boxplot(
+            box_data,
+            positions=positions,
+            widths=0.8 / n_groups,
+            patch_artist=True,
+            showfliers=False,
+        )
+
+        # Color the boxes
+        for patch, color in zip(bp["boxes"], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+
+        ax.set_title(f"{target_basin}\n{basin_name[:30]}", fontsize=10)
+        ax.set_xlabel("Month")
+        ax.set_ylabel(f"{var}")
+        ax.set_xticks(range(1, 13))
+        ax.set_xticklabels(["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"])
+        ax.grid(True, alpha=0.3, axis="y")
+
+        # Add legend for first subplot
+        if i == 0 and n_groups > 1:
+            # Create custom legend
+            from matplotlib.patches import Patch
+
+            legend_elements = []
+            for group in groups:
+                if group_by == "ssp_scenario":
+                    color = SSP_COLORS.get(group, "#000000")
+                elif group_by == "climate_model":
+                    color = CLIMATE_MODEL_COLORS.get(group, "#000000")
+                elif group_by == "hydro_model":
+                    color = HYDRO_MODEL_COLORS.get(group, "#000000")
+                legend_elements.append(Patch(facecolor=color, alpha=0.7, label=group))
+            ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
+
+    # Remove empty subplots
+    for j in range(len(basin_matches), max_plots):
+        if j < len(axes):
+            axes[j].remove()
+
+    plt.suptitle(f"Seasonal Distribution {title_suffix}", fontsize=16)
+    plt.tight_layout()
+
+    if save_name:
+        plt.savefig(PLOTS_DIR / f"{save_name}.png", dpi=300, bbox_inches="tight")
+        plt.savefig(PLOTS_DIR / f"{save_name}.pdf", bbox_inches="tight")
+
+    plt.show()
+
+
+def plot_monthly_heatmaps(
+    monthly_data,
+    basin_matches,
+    scenario="ssp370",
+    climate_model="gfdl-esm4",
+    var="qtot_mean",
+    title_suffix="",
+    save_name=None,
+    is_regional=False,
+):
+    """
+    Create heatmaps showing monthly patterns over years.
+    """
+    print(f"Creating monthly heatmaps for {scenario}, {climate_model}...")
+
+    n_basins = len(basin_matches)
+    if is_regional:
+        fig, axes = plt.subplots(2, 6, figsize=(36, 12))
+        max_plots = 12
+    else:
+        fig, axes = plt.subplots(2, 5, figsize=(30, 15))
+        max_plots = 10
+    axes = axes.flatten()
+
+    for i, (target_basin, basin_info) in enumerate(basin_matches.items()):
+        if i >= max_plots:
+            break
+
+        ax = axes[i]
+        basin_id = basin_info["id"]
+        basin_name = basin_info["name"]
+
+        # Filter data for this basin, scenario, and model
+        basin_data = monthly_data[
+            (monthly_data["BASIN_ID"] == basin_id)
+            & (monthly_data["ssp_scenario"] == scenario)
+            & (monthly_data["climate_model"] == climate_model)
+        ]
+
+        if len(basin_data) == 0:
+            ax.text(
+                0.5, 0.5, "No Data", ha="center", va="center", transform=ax.transAxes
+            )
+            ax.set_title(f"{target_basin}\n(No Data)")
+            continue
+
+        # Pivot to create year x month matrix
+        pivot_data = basin_data.pivot_table(
+            index="year", columns="month", values=var, aggfunc="mean"
+        )
+
+        # Create heatmap
+        im = ax.imshow(
+            pivot_data.values, aspect="auto", cmap="viridis", interpolation="nearest"
+        )
+
+        # Set ticks
+        ax.set_xticks(range(12))
+        ax.set_xticklabels(["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"])
+
+        # Set y-axis to show every 5th year
+        years = pivot_data.index
+        year_ticks = range(0, len(years), 5)
+        ax.set_yticks(year_ticks)
+        ax.set_yticklabels([years[i] for i in year_ticks])
+
+        ax.set_title(f"{target_basin}\n{basin_name[:30]}", fontsize=10)
+        ax.set_xlabel("Month")
+        ax.set_ylabel("Year")
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=8)
+        cbar.set_label(var, fontsize=8)
+
+    # Remove empty subplots
+    for j in range(len(basin_matches), max_plots):
+        if j < len(axes):
+            axes[j].remove()
+
+    plt.suptitle(
+        f"Monthly Patterns Heatmap\n{scenario.upper()}, {climate_model} {title_suffix}",
+        fontsize=16,
+    )
+    plt.tight_layout()
+
+    if save_name:
+        plt.savefig(PLOTS_DIR / f"{save_name}.png", dpi=300, bbox_inches="tight")
+        plt.savefig(PLOTS_DIR / f"{save_name}.pdf", bbox_inches="tight")
+
+    plt.show()
+
+
+def create_summary_statistics_plots(annual_data, basin_matches, var="qtot_mean_30yr"):
     """Create summary plots showing variance patterns."""
     print("Creating summary statistics plots...")
 
@@ -645,38 +1023,204 @@ def main():
         help="Timeseries plot of spread in RCP forcing among models.",
     )
     parser.add_argument(
-        "--var", type=str, default="qtot_30yr", help="var to plot for timeseries"
+        "--var", type=str, default="qtot_mean_30yr", help="var to plot for timeseries"
+    )
+    parser.add_argument(
+        "--regional",
+        action="store_true",
+        default=False,
+        help="Create regional aggregated plots instead of basin plots",
+    )
+    # Monthly visualization arguments
+    parser.add_argument(
+        "--monthly",
+        action="store_true",
+        default=False,
+        help="Create monthly climatology plots showing seasonal patterns",
+    )
+    parser.add_argument(
+        "--seasonal",
+        action="store_true",
+        default=False,
+        help="Create seasonal boxplots showing monthly distributions",
+    )
+    parser.add_argument(
+        "--heatmap",
+        action="store_true",
+        default=False,
+        help="Create monthly heatmaps showing patterns over years",
+    )
+    parser.add_argument(
+        "--monthly_var",
+        type=str,
+        default="qtot_mean",
+        help="Variable to use for monthly plots (default: qtot_mean)",
     )
     args = parser.parse_args()
     print("=" * 60)
-    print("TIMESERIES VISUALIZATION FOR REPRESENTATIVE BASINS")
+    if args.regional:
+        print("TIMESERIES VISUALIZATION FOR REGIONS")
+    else:
+        print("TIMESERIES VISUALIZATION FOR REPRESENTATIVE BASINS")
     print("=" * 60)
     var = args.var
     try:
         # Load data
         df = load_timeseries_data(var)
 
-        # Find representative basins
-        basin_matches = find_representative_basins(df, var)
+        if args.regional:
+            # Create regional aggregated data
+            annual_data, region_matches = create_regional_timeseries(
+                df, var, temporal_resolution="annual"
+            )
+            matches_to_use = region_matches
+            print("Using regional aggregation mode")
+        else:
+            # Find representative basins
+            basin_matches = find_representative_basins(df, var)
 
-        if not basin_matches:
-            print("No representative basins found!")
-            return
+            if not basin_matches:
+                print("No representative basins found!")
+                return
 
-        # Create annual timeseries
-        annual_data = create_annual_timeseries(df, basin_matches, var)
+            # Create annual timeseries
+            annual_data = create_annual_timeseries(df, basin_matches, var)
+            matches_to_use = basin_matches
+            print("Using basin-level mode")
 
         # Create SSP-grouped plots
         if args.ssp_spread:
-            plot_ssp_grouped_timeseries(annual_data, basin_matches, var)
+            timeseries_plot(
+                annual_data,
+                matches_to_use,
+                group_by="ssp_scenario",
+                color_map=SSP_COLORS,
+                var=var,
+                is_regional=args.regional,
+                plot_type="spread",
+                title_suffix="Timeseries by SSP Scenario\n(Shaded regions show Climate and Hydro model spread)",
+                save_name="ssp_grouped_timeseries",
+            )
 
         # Create climate model-grouped plots
         if args.clim_model_spread:
-            plot_model_grouped_timeseries(annual_data, basin_matches, var)
+            timeseries_plot(
+                annual_data,
+                matches_to_use,
+                group_by="climate_model",
+                color_map=CLIMATE_MODEL_COLORS,
+                var=var,
+                is_regional=args.regional,
+                plot_type="spread",
+                title_suffix="Timeseries by Climate Model\n(Shaded regions show Hydro Model and SSP spread)",
+                save_name="model_grouped_timeseries",
+            )
 
         # Create hydro model-grouped plots (if hydro models are available)
         if args.hydro_model_spread:
-            plot_hydro_grouped_timeseries(annual_data, basin_matches, var)
+            timeseries_plot(
+                annual_data,
+                matches_to_use,
+                group_by="hydro_model",
+                color_map=HYDRO_MODEL_COLORS,
+                var=var,
+                is_regional=args.regional,
+                plot_type="spread",
+                title_suffix="Timeseries by Hydro Model\n(Shaded regions show Climate model and SSP spread)",
+                save_name="hydro_grouped_timeseries",
+            )
+
+        # Create monthly visualizations if requested
+        if args.monthly or args.seasonal or args.heatmap:
+            print("\n" + "=" * 60)
+            print("CREATING MONTHLY VISUALIZATIONS")
+            print("=" * 60)
+
+            # Create monthly timeseries data
+            if args.regional:
+                monthly_data, _ = create_regional_timeseries(
+                    df, args.monthly_var, temporal_resolution="monthly"
+                )
+            else:
+                monthly_data = create_monthly_timeseries(
+                    df, matches_to_use, var=args.monthly_var
+                )
+
+            # Monthly climatology plots
+            if args.monthly:
+                # Group by SSP scenario
+                plot_monthly_climatology(
+                    monthly_data,
+                    matches_to_use,
+                    group_by="ssp_scenario",
+                    var=args.monthly_var,
+                    title_suffix="by SSP Scenario",
+                    save_name="monthly_climatology_ssp",
+                    is_regional=args.regional,
+                )
+
+                # Group by climate model
+                plot_monthly_climatology(
+                    monthly_data,
+                    matches_to_use,
+                    group_by="climate_model",
+                    var=args.monthly_var,
+                    title_suffix="by Climate Model",
+                    save_name="monthly_climatology_model",
+                    is_regional=args.regional,
+                )
+
+                # Group by hydro model if available
+                if "hydro_model" in monthly_data.columns:
+                    plot_monthly_climatology(
+                        monthly_data,
+                        matches_to_use,
+                        group_by="hydro_model",
+                        var=args.monthly_var,
+                        title_suffix="by Hydro Model",
+                        save_name="monthly_climatology_hydro",
+                        is_regional=args.regional,
+                    )
+
+            # Seasonal boxplots
+            if args.seasonal:
+                plot_seasonal_boxplots(
+                    monthly_data,
+                    matches_to_use,
+                    group_by="ssp_scenario",
+                    var=args.monthly_var,
+                    title_suffix="by SSP Scenario",
+                    save_name="seasonal_boxplots_ssp",
+                    is_regional=args.regional,
+                )
+
+                plot_seasonal_boxplots(
+                    monthly_data,
+                    matches_to_use,
+                    group_by="climate_model",
+                    var=args.monthly_var,
+                    title_suffix="by Climate Model",
+                    save_name="seasonal_boxplots_model",
+                    is_regional=args.regional,
+                )
+
+            # Monthly heatmaps
+            if args.heatmap:
+                # Create heatmaps for different scenario/model combinations
+                scenarios = ["ssp126", "ssp370", "ssp585"]
+                models = ["gfdl-esm4", "mpi-esm1-2-hr"]
+
+                for scenario in scenarios:
+                    for model in models:
+                        plot_monthly_heatmaps(
+                            monthly_data,
+                            matches_to_use,
+                            scenario=scenario,
+                            climate_model=model,
+                            var=args.monthly_var,
+                            save_name=f"monthly_heatmap_{scenario}_{model}",
+                            is_regional=args.regional,
+                        )
 
         # Create summary statistics
         # variance_df = create_summary_statistics_plots(annual_data, basin_matches, var)
