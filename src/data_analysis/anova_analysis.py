@@ -14,13 +14,10 @@ For each of the 217 basins, we calculate the percentage contribution of each fac
 """
 
 import pandas as pd
-import numpy as np
 from pathlib import Path
-import matplotlib.pyplot as plt
 from statsmodels.stats.anova import anova_lm
 from statsmodels.formula.api import ols
 import warnings
-import sys
 import logging
 
 # Set up logging
@@ -59,7 +56,7 @@ def auto_discover_categories(df):
     climate_models = sorted(df["climate_model"].unique())
     ssp_scenarios = sorted(df["ssp_scenario"].unique())
 
-    logger.info(f"Auto-discovered categories:")
+    logger.info("Auto-discovered categories:")
     logger.info(f"  Hydro models: {hydro_models}")
     logger.info(f"  Climate models: {climate_models}")
     logger.info(f"  SSP scenarios: {ssp_scenarios}")
@@ -80,12 +77,16 @@ def perform_temporal_anova(df, target_variable="qtot", model_name="base"):
         pd.DataFrame: Results for all basins
     """
     logger.info(f"Performing ANOVA for {target_variable} ({model_name})...")
-
-    # Standard formula template - same structure for all temporal representations
-    formula = f"""{target_variable} ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + year + 
-                  C(ssp_scenario):C(climate_model) + C(ssp_scenario):C(hydro_model) + 
-                  C(climate_model):C(hydro_model) + C(ssp_scenario):year + 
-                  C(climate_model):year + C(hydro_model):year"""
+    match target_variable:
+        case "qtot_mean":
+            formula = f"""{target_variable} ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + year + 
+            C(ssp_scenario):C(climate_model) + C(ssp_scenario):year + C(month):C(ssp_scenario)
+            """
+            logger.info(f"{target_variable} adding month X ssp interaction term")
+        case _:
+            # Standard formula template - same structure for all temporal representations
+            formula = f"""{target_variable} ~ C(ssp_scenario) + C(climate_model) + C(hydro_model) + C(month) + year + 
+                        C(ssp_scenario):C(climate_model) + C(ssp_scenario):year """
 
     results = []
     basin_ids = df["BASIN_ID"].unique()
@@ -181,20 +182,6 @@ def perform_temporal_anova(df, target_variable="qtot", model_name="base"):
     return results_df
 
 
-def perform_anova_by_basin(df):
-    """
-    Perform ANOVA analysis for each basin separately using qtot.
-    This is a wrapper around perform_temporal_anova for backward compatibility.
-
-    Args:
-        df (pd.DataFrame): Long format dataframe
-
-    Returns:
-        pd.DataFrame: Variance decomposition results by basin
-    """
-    return perform_temporal_anova(df, target_variable="qtot", model_name="annual")
-
-
 def create_summary_statistics(results_df):
     """
     Create summary statistics across all basins.
@@ -251,9 +238,7 @@ def create_summary_statistics(results_df):
                 .replace("_", " ")
                 .title()
             )
-            factor_name = factor_name.replace("Ssp", "SSP").replace(
-                "Climate Model", "Model"
-            )
+            factor_name = factor_name.replace("Ssp", "SSP")
 
             sig_count = (results_df[pval_col] < alpha).sum()
             sig_pct = (sig_count / len(results_df)) * 100 if len(results_df) > 0 else 0
@@ -345,7 +330,7 @@ def print_anova_results_summary(results_df, model_name="", title=None):
             label = (
                 col.replace("_pct", "").replace("_x_", " × ").replace("_", " ").title()
             )
-            label = label.replace("Ssp", "SSP").replace("Climate Model", "Model")
+            label = label.replace("Ssp", "SSP")
 
             mean_val = results_df[col].mean()
             std_val = results_df[col].std()
@@ -374,7 +359,7 @@ def print_anova_results_summary(results_df, model_name="", title=None):
                 .replace("_", " ")
                 .title()
             )
-            label = label.replace("Ssp", "SSP").replace("Climate Model", "Model")
+            label = label.replace("Ssp", "SSP")
             if "ssp_scenario" in pval_col:
                 label = "SSP Scenario"
             elif "climate_model" in pval_col:
@@ -435,7 +420,12 @@ def main(input_file=None, target_variable=None, save_results=False):
 
         # Define available analyses
         available_analyses = {
-            "qtot": ("annual", lambda df: perform_anova_by_basin(df)),
+            "qtot_mean": (
+                "annual",
+                lambda df: perform_temporal_anova(
+                    df, target_variable="qtot_mean", model_name="annual"
+                ),
+            ),
             "qtot_mean_5yr": (
                 "5yr_rolling",
                 lambda df: perform_temporal_anova(
@@ -548,7 +538,7 @@ if __name__ == "__main__":
         help="Path to the prepared data CSV file (default: anova_results/qtot_monthly_rolling_averages.csv)",
     )
     parser.add_argument(
-        "--save_results",
+        "--save-results",
         action="store_true",
         default=False,
         help="Store results from anova",
@@ -557,7 +547,7 @@ if __name__ == "__main__":
         "--target-variable",
         type=str,
         default=None,
-        choices=["qtot", "qtot_mean_5yr", "qtot_mean_30yr"],
+        choices=["qtot_mean", "qtot_mean_5yr", "qtot_mean_30yr"],
         help="Specific variable to analyze. If not specified, analyzes all available variables.",
     )
     parser.add_argument(
@@ -573,4 +563,8 @@ if __name__ == "__main__":
     # Update logging level based on argument
     logging.getLogger().setLevel(getattr(logging, args.log_level))
 
-    main(input_file=args.input, target_variable=args.target_variable)
+    main(
+        input_file=args.input,
+        target_variable=args.target_variable,
+        save_results=args.save_results,
+    )
